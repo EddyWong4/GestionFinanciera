@@ -52,6 +52,7 @@ const estadoVacio = () => ({
   fijos: [],    // {id, tipo:'gasto'|'ingreso', nombre, monto, cat, cuando:'cada'|'q1'|'q2'|'semanal', dia?, diaSemana?}
   presupuestos: {}, // { categoría: tope por quincena }
   personas: [], // préstamos entre personas {id, nombre, sentido:'meDeben'|'debo', monto, fecha, nota}
+  historial: {}, // patrimonio neto al cierre de cada mes { 'YYYY-MM': monto }
   ajustes: { iva: true, estrategia: 'avalancha', presupuestoDeuda: 0, ultimoExport: null, modo: 'quincena', ultimoMedio: null, cuentasRevisadas: false },
 });
 
@@ -132,6 +133,8 @@ function guardar() {
   clearTimeout(timerGuardar);
   timerGuardar = setTimeout(async () => {
     try {
+      // Foto mensual del patrimonio neto (para ver su evolución en Reportes)
+      S.historial[hoyISO().slice(0, 7)] = Math.round(patrimonio().neto);
       await DB.escribir(S);
       await respaldoAutomatico();
     } catch (e) { toast('⚠️ No se pudo guardar: ' + e.message); }
@@ -520,13 +523,13 @@ function consejos(t) {
 const htmlTips = tips => tips.map(c => `<div class="tip ${c.nivel}"><span class="ic">${c.ic}</span><div>${c.txt}</div></div>`).join('');
 
 /* ---------- Vistas ---------- */
-const TITULOS = { resumen: 'Resumen', movs: 'Movimientos', ahorro: 'Ahorro', deudas: 'Deudas', ajustes: 'Ajustes' };
+const TITULOS = { resumen: 'Resumen', movs: 'Movimientos', ahorro: 'Ahorro', deudas: 'Deudas', reportes: 'Reportes', ajustes: 'Ajustes' };
 function render() {
   $('#titulo').textContent = TITULOS[vista];
   $('#per-lbl').textContent = nombrePeriodo(per);
   $('#per-lbl').classList.toggle('actual', per === periodoDe(hoyISO()));
   $('.mes-nav').style.visibility = (vista === 'resumen' || vista === 'movs') ? 'visible' : 'hidden';
-  $('.fab').style.display = vista === 'ajustes' ? 'none' : '';
+  $('.fab').style.display = vista === 'ajustes' || vista === 'reportes' ? 'none' : '';
   $$('.tabbar button').forEach(b => b.classList.toggle('activo', b.dataset.tab === vista));
   $('#vista').innerHTML = VISTAS[vista]();
 }
@@ -821,6 +824,7 @@ function htmlCompromisos(pend, proyectado) {
 }
 
 const VISTAS = {
+  reportes: () => htmlReportes(),
   resumen() {
     const t = totales(per);
     const pend = pendientes(per);
@@ -1064,6 +1068,111 @@ const VISTAS = {
     `;
   },
 };
+
+/* ---------- Reportes ---------- */
+function patrimonio() {
+  const activos = [
+    ['Cuentas', totalCuentas()],
+    ['Ahorro apartado', S.metas.reduce((a, m) => a + acumuladoMeta(m), 0)],
+    ['Te deben', totalPersonas('meDeben')],
+  ];
+  const pasivos = [
+    ['Tarjetas y préstamos', S.deudas.reduce((a, d) => a + saldoDeuda(d), 0)],
+    ['Compras a meses', msiActivas().reduce((a, c) => a + saldoMSI(c), 0)],
+    ['Debes a personas', totalPersonas('debo')],
+  ];
+  const A = activos.reduce((a, x) => a + x[1], 0), P = pasivos.reduce((a, x) => a + x[1], 0);
+  return { activos, pasivos, A, P, neto: A - P };
+}
+const flecha = (act, ant, masEsBueno) => {
+  if (!ant) return '<span class="muted">—</span>';
+  const d = (act - ant) / Math.abs(ant), bueno = masEsBueno ? d >= 0 : d <= 0;
+  return `<span style="color:${Math.abs(d) < 0.005 ? 'var(--muted)' : bueno ? 'var(--ingreso)' : 'var(--deuda)'}">${d >= 0 ? '▲' : '▼'} ${pct(Math.abs(d))}</span>`;
+};
+
+function htmlReportes() {
+  const pat = patrimonio();
+  const hist = Object.entries({ ...S.historial, [hoyISO().slice(0, 7)]: Math.round(pat.neto) }).sort().slice(-12);
+  const maxH = Math.max(1, ...hist.map(([, v]) => Math.abs(v)));
+  const lineas = l => l.filter(x => x[1]).map(([n, v]) => `<div class="lin"><span>${n}</span><b>${fmt(v)}</b></div>`).join('') || '<div class="small muted">—</div>';
+
+  // Este mes vs. el anterior (siempre por mes calendario)
+  const mAct = hoyISO().slice(0, 7), mAnt = sumarMeses(mAct, -1);
+  const a = totales(mAct), b = totales(mAnt);
+  const filasComp = [['Ingresos', 'ingreso', true], ['Gastos', 'gasto', false], ['Ahorro y pagos', null, true], ['Dinero libre', 'libre', true]]
+    .map(([n, k, bueno]) => { const va = k ? a[k] : a.ahorro + a.pagos, vb = k ? b[k] : b.ahorro + b.pagos;
+      return `<tr><td>${n}</td><td class="n">${fmt(vb)}</td><td class="n"><b>${fmt(va)}</b></td><td class="n">${flecha(va, vb, bueno)}</td></tr>`; }).join('');
+  const cats = [...new Set([...Object.keys(a.porCat), ...Object.keys(b.porCat)])]
+    .map(c => [c, a.porCat[c] || 0, b.porCat[c] || 0]).sort((x, y) => y[1] - x[1]).slice(0, 8);
+
+  // El año, mes por mes
+  const y = mAct.slice(0, 4);
+  const meses = Array.from({ length: 12 }, (_, i) => `${y}-${String(i + 1).padStart(2, '0')}`);
+  const tm = meses.map(m => totales(m));
+  const maxM = Math.max(1, ...tm.flatMap(t => [t.ingreso, t.gasto]));
+  const anual = tm.reduce((s, t) => { s.ing += t.ingreso; s.gas += t.gasto; for (const [c, v] of Object.entries(t.porCat)) s.cat[c] = (s.cat[c] || 0) + v; return s; }, { ing: 0, gas: 0, cat: {} });
+  const topCat = Object.entries(anual.cat).sort((x, y) => y[1] - x[1]).slice(0, 6);
+
+  return `
+    <section class="card">
+      <h2>💎 Patrimonio neto</h2>
+      <div class="patrimonio" style="color:${pat.neto < 0 ? 'var(--deuda)' : 'var(--ingreso)'}">${fmt(pat.neto)}</div>
+      <p class="small muted" style="margin-top:0">Lo que tienes menos lo que debes. Es la cifra que mejor dice si vas mejorando: que suba cada mes.</p>
+      <div class="comparativo">
+        <div><span class="small muted">Lo que tienes</span><b class="c-ingreso">${fmt(pat.A)}</b>${lineas(pat.activos)}</div>
+        <div><span class="small muted">Lo que debes</span><b class="c-deuda">${fmt(pat.P)}</b>${lineas(pat.pasivos)}</div>
+      </div>
+      ${hist.length > 1 ? `<div class="tendencia">${hist.map(([m, v]) => `<div class="col"><div class="pair"><span style="width:60%;max-width:26px;height:${Math.abs(v) / maxH * 100}%;background:${v < 0 ? 'var(--deuda)' : 'var(--ahorro)'}" title="${fmt(v)}"></span></div><div class="lbl">${nombreMes(m)}</div></div>`).join('')}</div>`
+        : '<p class="small muted" style="margin-bottom:0">La app guarda una foto de tu patrimonio cada mes; aquí verás cómo cambia.</p>'}
+    </section>
+
+    <section class="card">
+      <h2>📆 ${nombrePeriodo(mAct)} vs. ${nombrePeriodo(mAnt)}</h2>
+      <table class="plan"><thead><tr><th></th><th class="n">Anterior</th><th class="n">Este mes</th><th class="n">Cambio</th></tr></thead><tbody>${filasComp}</tbody></table>
+      ${cats.length ? `<p class="dia">Gastos por categoría</p><table class="plan"><tbody>${cats.map(([c, va, vb]) => `<tr><td>${esc(c)}</td><td class="n muted">${fmt(vb)}</td><td class="n"><b>${fmt(va)}</b></td><td class="n">${flecha(va, vb, false)}</td></tr>`).join('')}</tbody></table>` : ''}
+      <p class="small muted" style="margin-bottom:0">Compara meses completos; el mes actual va sumando conforme avanza.</p>
+    </section>
+
+    <section class="card">
+      <h2>📅 Tu ${y}</h2>
+      <div class="tendencia">${tm.map((t, i) => `<div class="col"><div class="pair">
+        <span style="height:${t.ingreso / maxM * 100}%;background:var(--ingreso)" title="Ingresos ${fmt(t.ingreso)}"></span>
+        <span style="height:${t.gasto / maxM * 100}%;background:var(--gasto)" title="Gastos ${fmt(t.gasto)}"></span>
+      </div><div class="lbl">${MESES[i][0].toUpperCase()}</div></div>`).join('')}</div>
+      <div class="leyenda"><span><i style="background:var(--ingreso)"></i>Ingresos ${fmt(anual.ing)}</span><span><i style="background:var(--gasto)"></i>Gastos ${fmt(anual.gas)}</span></div>
+      ${topCat.length ? `<p class="dia">En qué se fue tu dinero</p>${topCat.map(([c, v]) => `<div class="bar-row"><div class="row"><span>${esc(c)}</span><span><b>${fmt(v)}</b> <span class="meta">${pct(v / anual.gas)}</span></span></div><div class="bar"><span style="width:${v / topCat[0][1] * 100}%;background:var(--gasto)"></span></div></div>`).join('')}` : ''}
+    </section>
+
+    <section class="card">
+      <h2>📤 Exportar a Excel</h2>
+      <p class="small muted" style="margin-top:-4px">Descarga tus movimientos en un archivo CSV que abre en Excel o Google Sheets. Se guarda en tu dispositivo.</p>
+      <div class="acciones">
+        <button class="btn" data-action="exportar-csv" data-v="${y}">Movimientos de ${y}</button>
+        <button class="btn sec" data-action="exportar-csv" data-v="todo">Todos los movimientos</button>
+      </div>
+    </section>`;
+}
+
+const TIPO_MOV = { ingreso: 'Ingreso', gasto: 'Gasto', ahorro: 'Ahorro', pago: 'Pago de deuda', traspaso: 'Traspaso', personal: 'Préstamo entre personas' };
+async function exportarCSV(anio) {
+  const lista = S.movs.filter(m => anio === 'todo' || m.fecha.startsWith(anio)).sort((a, b) => a.fecha.localeCompare(b.fecha));
+  if (!lista.length) return toast('No hay movimientos para exportar');
+  const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const filas = [['Fecha', 'Tipo', 'Categoría', 'Monto', 'Cuenta / tarjeta', 'Nota'].map(q).join(',')];
+  for (const m of lista) {
+    // Salidas en negativo para poder sumar la columna en Excel
+    const signo = m.tipo === 'ingreso' ? 1 : m.tipo === 'personal' ? Math.sign(m.monto) : m.tipo === 'traspaso' ? 0 : -1;
+    const monto = m.tipo === 'traspaso' ? m.monto : signo * Math.abs(m.monto);
+    const medio = m.tipo === 'traspaso' ? `${nombreMedio(m)} → ${nombreMedio({ cuentaId: m.destinoId })}` : nombreMedio(m);
+    filas.push([m.fecha, TIPO_MOV[m.tipo] || m.tipo, m.cat, monto.toFixed(2), medio.replace(/^\S+\s/, ''), m.nota].map(q).join(','));
+  }
+  const nombre = `mis-finanzas-movimientos-${anio}.csv`;
+  const blob = new Blob(['﻿' + filas.join('\r\n')], { type: 'text/csv;charset=utf-8' }); // BOM: Excel respeta acentos
+  const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: nombre });
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  toast(`📤 ${lista.length} movimientos exportados`);
+}
 
 function planHTML(activas, sumMin, mensMSI = 0) {
   const est = S.ajustes.estrategia;
@@ -1632,6 +1741,7 @@ function validarDatos(d) {
   if (d && !Array.isArray(d.msi)) d.msi = [];
   if (d && (typeof d.presupuestos !== 'object' || !d.presupuestos)) d.presupuestos = {};
   if (d && !Array.isArray(d.personas)) d.personas = [];
+  if (d && (typeof d.historial !== 'object' || !d.historial)) d.historial = {};
   return d && Array.isArray(d.movs) && Array.isArray(d.metas) && Array.isArray(d.deudas) && typeof d.ajustes === 'object';
 }
 async function aplicarDatos(d, msg) {
@@ -1653,6 +1763,7 @@ const ACCIONES = {
     confirmar('Eliminar movimiento', `¿Eliminar <b>${esc(m.cat)}</b> por ${fmt(Math.abs(m.monto))}?${extra ? `<br><span class="small muted">${extra}</span>` : ''}`, () => quitarMov(m));
   },
   presupuesto: () => formPresupuesto(),
+  'exportar-csv': el => exportarCSV(el.dataset.v),
   'nueva-persona': () => formPersona(),
   'abono-persona': el => formAbonoPersona(buscarId(S.personas, el.dataset.id)),
   'borrar-persona': el => {

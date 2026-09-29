@@ -161,7 +161,7 @@ main { max-width: 760px; margin: 0 auto; padding: 16px; outline: none; }
 /* Tabbar */
 .tabbar {
   position: fixed; bottom: 0; left: 0; right: 0; z-index: 5;
-  display: grid; grid-template-columns: repeat(5, 1fr);
+  display: grid; grid-template-columns: repeat(6, 1fr);
   background: var(--card); border-top: 1px solid var(--line);
   padding-bottom: env(safe-area-inset-bottom);
 }
@@ -263,6 +263,11 @@ table.proy tr.det td { font-size: .72rem; color: var(--muted); padding-top: 2px;
   box-shadow: 0 6px 16px rgba(0,0,0,.3); font-size: .9rem; max-width: 520px; margin: 0 auto;
 }
 
+.patrimonio { font-size: 2rem; font-weight: 800; font-variant-numeric: tabular-nums; margin: 2px 0 4px; }
+.comparativo > div { min-width: 0; }
+.comparativo .lin { margin-top: 4px; font-size: .76rem; color: var(--muted); }
+.comparativo .lin b { display: block; font-size: .85rem; color: var(--text); font-variant-numeric: tabular-nums; }
+.tabbar button { font-size: .64rem; }
 h2.seccion { font-size: .95rem; margin: 18px 4px 10px; color: var(--muted); }
 h2.seccion:first-of-type { margin-top: 4px; }
 

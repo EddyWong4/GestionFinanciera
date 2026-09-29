@@ -1,8 +1,14 @@
 // Versión de la app. Súbela en cada cambio publicado: la usan app.js (pantalla y avisos)
 // y sw.js (nombre de la caché, para que la app instalada descargue la versión nueva).
-const VERSION = '1.10.0';
+const VERSION = '1.11.0';
 
 const NOVEDADES = [
+  { v: '1.11.0', fecha: '2026-09-29', cambios: [
+    'Nueva pestaña Reportes: patrimonio neto (lo que tienes menos lo que debes) y su evolución mes a mes.',
+    'Comparativo de este mes contra el anterior, general y por categoría.',
+    'Tu año mes por mes y en qué se fue tu dinero.',
+    'Exportar movimientos a Excel (CSV).',
+  ] },
   { v: '1.10.0', fecha: '2026-09-29', cambios: [
     'Préstamos personales, automotrices e hipotecarios con pago fijo: pagos restantes, fecha de término e intereses por pagar.',
     'Entre personas: lleva lo que prestas y lo que te prestan, con sus abonos.',
