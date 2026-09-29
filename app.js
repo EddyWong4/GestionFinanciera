@@ -426,6 +426,24 @@ function consejos(t) {
     else add('warn', '📊', `Ya usaste el ${pct(f.uso)} del presupuesto de <b>${esc(f.cat)}</b>: te quedan ${fmt(f.tope - f.gastado)} para ${palabraPeriodo()}.`);
   }
   if (!hayPresupuesto() && S.movs.filter(m => m.tipo === 'gasto').length >= 10) add('info', '📊', 'Ya tienes suficientes gastos registrados: pon un <b>presupuesto por categoría</b> (botón en "Gastos por categoría"). La app te lo puede sugerir con tu historial.');
+  // Gastos del año que ya se acercan sin estar cubiertos
+  for (const m of previsiones()) {
+    const qs = quincenasHasta(m.fechaMeta), falta = faltaPrevision(m);
+    if (falta > 0 && qs <= 4) add(qs <= 2 ? 'bad' : 'warn', '📅', `<b>${esc(m.nombre)}</b> se paga en ${nombrePeriodo(m.fechaMeta)} y te faltan ${fmt(falta)}: aparta ${fmt(falta / qs)} por quincena.`);
+  }
+  // Aguinaldo: plan de uso en noviembre/diciembre o cuando se registra
+  const mesHoy = +hoyISO().slice(5, 7);
+  const aguinaldo = movsPer(per).filter(m => m.tipo === 'ingreso' && m.cat === 'Aguinaldo / bonos').reduce((a, m) => a + m.monto, 0);
+  if (aguinaldo > 0 || mesHoy >= 11) {
+    const enero = previsiones().filter(m => quincenasHasta(m.fechaMeta) <= 6).reduce((a, m) => a + faltaPrevision(m), 0);
+    const cara = deudasActivas().sort((a, b) => b.tasa - a.tasa)[0];
+    const pasos = [
+      enero > 0 ? `cubrir lo que falta de tus gastos de inicio de año (${fmt(enero)})` : 'apartar para la cuesta de enero (predial, inscripciones, tenencia)',
+      cara ? `abonar a <b>${esc(cara.nombre)}</b> (${cara.tasa}% anual, tu deuda más cara)` : 'completar tu fondo de emergencia',
+      'y solo lo que sobre, para gustos de fin de año',
+    ];
+    add('info', '🎁', `${aguinaldo > 0 ? `Recibiste ${fmt(aguinaldo)} de aguinaldo/bonos.` : 'Se acerca el aguinaldo.'} Un buen orden para usarlo: ${pasos.join(', ')}.`);
+  }
   const apretada = S.fijos.some(f => f.tipo === 'ingreso') && proyeccion().slice(1).find(f => f.saldo < 0);
   if (apretada) add('bad', '🔮', `Según tu proyección, en la <b>${nombrePeriodo(apretada.q)}</b> te faltarían ${fmt(-apretada.saldo)}. Revisa "Próximas quincenas" y prepárate con tiempo.`);
   for (const c of S.cuentas) if (saldoCuenta(c) < -0.5) add('bad', '🏦', `Tu cuenta <b>${esc(c.nombre)}</b> está en ${fmt(saldoCuenta(c))}. Revisa si falta registrar un ingreso o ajusta su saldo real (✏️ en "Mis cuentas").`);
@@ -579,7 +597,13 @@ function flujoQuincena(q, esActual) {
     const fijosQ = Object.values(fijosPorCat).reduce((a, v) => a + v, 0);
     variable = Math.max(0, promedioGastoMensual() / 2 - (t ? t.gasto : 0) - fijosQ);
   }
-  return { q, entra, fijos, deudas, variable, sale: fijos + deudas + variable };
+  // Lo que toca apartar para los gastos del año (en la quincena actual, descontando lo ya apartado)
+  let aparta = 0;
+  for (const m of previsiones()) {
+    if (q.slice(0, 7) >= m.fechaMeta) continue;
+    aparta += esActual ? Math.max(0, cuotaPrevision(m) - apartadoEnQActual(m)) : cuotaPrevision(m);
+  }
+  return { q, entra, fijos, deudas, variable, aparta, sale: fijos + deudas + variable + aparta };
 }
 function proyeccion(n = 6) {
   const hoy = hoyISO();
@@ -598,7 +622,7 @@ function htmlProyeccion() {
   const apretada = filas.find(f => f.saldo < 0);
   return `<section class="card">
     <h2>🔮 Próximas quincenas</h2>
-    <p class="small muted" style="margin-top:-6px">Parte de lo que tienes hoy en tus cuentas (${fmt(totalCuentas())}) y suma tus ingresos fijos; resta fijos, pagos de tarjetas, mensualidades y ${hayPresupuesto() ? 'tu presupuesto' : 'tu gasto promedio'}.</p>
+    <p class="small muted" style="margin-top:-6px">Parte de lo que tienes hoy en tus cuentas (${fmt(totalCuentas())}) y suma tus ingresos fijos; resta fijos, pagos de tarjetas, mensualidades, ${hayPresupuesto() ? 'tu presupuesto' : 'tu gasto promedio'}${previsiones().length ? ' y lo que toca apartar para gastos del año' : ''}.</p>
     ${sinIngresos ? '<div class="tip info"><span class="ic">💡</span><div>Da de alta tu <b>sueldo como ingreso fijo</b> (📌 + Fijo) para que la proyección sea real.</div></div>' : ''}
     ${apretada ? `<div class="tip bad"><span class="ic">⚠️</span><div>En la <b>${nombrePeriodo(apretada.q)}</b> te faltarían <b>${fmt(-apretada.saldo)}</b>. Prepárate desde ahora: aparta dinero o recorta gastos antes de esa fecha.</div></div>` : ''}
     <table class="plan proy">
@@ -608,10 +632,98 @@ function htmlProyeccion() {
         <td class="n c-ingreso">${fmt(f.entra)}</td>
         <td class="n c-gasto">${fmt(f.sale)}</td>
         <td class="n"><b style="color:${f.saldo < 0 ? 'var(--deuda)' : 'inherit'}">${fmt(f.saldo)}</b></td>
-      </tr><tr class="det"><td colspan="4">Fijos ${fmt(f.fijos)} · deudas ${fmt(f.deudas)} · día a día ${fmt(f.variable)}</td></tr>`).join('')}</tbody>
+      </tr><tr class="det"><td colspan="4">Fijos ${fmt(f.fijos)} · deudas ${fmt(f.deudas)} · día a día ${fmt(f.variable)}${f.aparta ? ` · apartar ${fmt(f.aparta)}` : ''}</td></tr>`).join('')}</tbody>
     </table>
     <p class="small muted" style="margin-bottom:0">Para tarjetas usa el pago mínimo. Si pagas más (recomendado), te quedará menos, pero bajará más rápido tu deuda.</p>
   </section>`;
+}
+
+/* ---------- Gastos del año (previsión): tenencia, seguro, predial, inscripciones… ---------- */
+// Son metas con anual:true; fechaMeta = mes en que toca pagar (se recorre un año al pagarlo)
+const previsiones = () => S.metas.filter(m => m.anual);
+const qActual = () => { const h = hoyISO(); return `${h.slice(0, 7)}-${+h.slice(8, 10) <= 15 ? 1 : 2}`; };
+// Quincenas que faltan (incluida la actual) antes de que empiece el mes ym
+function quincenasHasta(ym) {
+  let n = 0, q = qActual();
+  while (q.slice(0, 7) < ym && n < 60) { n++; q = moverPeriodo(q, 1); }
+  return Math.max(1, n);
+}
+const faltaPrevision = m => Math.max(0, m.objetivo - acumuladoMeta(m));
+// Lo apartado en la quincena actual cuenta como la cuota de esta quincena (no se reparte de nuevo)
+const apartadoEnQActual = m => { const r = rango(qActual()); return S.movs.filter(x => x.metaId === m.id && x.monto > 0 && enRango(x.fecha, r)).reduce((a, x) => a + x.monto, 0); };
+const cuotaPrevision = m => faltaPrevision(m) > 0 ? (faltaPrevision(m) + apartadoEnQActual(m)) / quincenasHasta(m.fechaMeta) : 0;
+const proximoMes = mes => { const h = hoyISO(), y = +h.slice(0, 4), actual = +h.slice(5, 7); return `${mes >= actual ? y : y + 1}-${String(mes).padStart(2, '0')}`; };
+const SUGERIDAS = [['Predial', 1], ['Tenencia / refrendo', 3], ['Seguro del auto', 6], ['Inscripciones y útiles', 8], ['Regalos de diciembre', 12], ['Vacaciones', 7]];
+
+function htmlPrevisiones() {
+  const lista = previsiones().sort((a, b) => a.fechaMeta.localeCompare(b.fechaMeta));
+  const cuotaTotal = lista.reduce((a, m) => a + cuotaPrevision(m), 0);
+  const tarjetas = lista.map(m => {
+    const acc = acumuladoMeta(m), p = m.objetivo ? Math.min(1, acc / m.objetivo) : 0;
+    const qs = quincenasHasta(m.fechaMeta), listo = acc >= m.objetivo;
+    return `<div class="msi">
+      <div class="row"><b>${esc(m.nombre)}</b><b>${fmt(m.objetivo)}</b></div>
+      <div class="small muted">Se paga en ${nombrePeriodo(m.fechaMeta)} · faltan ${qs} quincena${qs === 1 ? '' : 's'}</div>
+      <div class="bar" style="margin:6px 0"><span style="width:${p * 100}%;background:var(--ahorro)"></span></div>
+      <div class="row small"><span>Apartado: <b class="c-ahorro">${fmt(acc)}</b></span>${listo ? '<span class="c-ingreso">✅ Completo</span>' : `<span>Aparta <b>${fmt(cuotaPrevision(m))}</b> por quincena</span>`}</div>
+      <div class="acciones">
+        ${listo ? '' : `<button class="btn mini" data-action="aportar" data-id="${m.id}">+ Apartar</button>`}
+        <button class="btn mini sec" data-action="pagar-prevision" data-id="${m.id}">Ya lo pagué</button>
+        <button class="btn mini sec" data-action="editar-meta" data-id="${m.id}">Editar</button>
+      </div>
+    </div>`;
+  }).join('');
+  const faltantes = SUGERIDAS.filter(([n]) => !lista.some(m => m.nombre === n));
+  return `<h2 class="seccion">📅 Gastos del año</h2>
+  <section class="card">
+    <div class="row"><span class="small muted">Gastos que no son de cada mes: divídelos entre las quincenas que faltan y que no te tomen por sorpresa.</span>
+      <button class="btn mini" data-action="nueva-prevision">+ Agregar</button></div>
+    ${tarjetas}
+    ${lista.length ? `<div class="resumen-fijos"><div class="row"><b>Apartar por quincena</b><b class="c-ahorro">${fmt(cuotaTotal)}</b></div></div>` : ''}
+    ${faltantes.length ? `<p class="dia">Ideas</p><div class="chips" style="margin:6px 0 0">${faltantes.map(([n, mes]) => `<button class="chip" data-action="nueva-prevision" data-nombre="${n}" data-mes="${mes}">+ ${n}</button>`).join('')}</div>` : ''}
+  </section>`;
+}
+
+function formPrevision(meta, sug = {}) {
+  const mesDef = +sug.mes || (+hoyISO().slice(5, 7) % 12) + 1; // sugerido, o el mes que entra
+  const m = meta || { nombre: sug.nombre || '', objetivo: '', inicial: 0, fechaMeta: proximoMes(mesDef), cat: 'Otros gastos' };
+  const mes = +m.fechaMeta.slice(5, 7);
+  dialogo(meta ? 'Editar gasto del año' : 'Nuevo gasto del año', `
+    ${campo('¿Qué es?', `name="nombre" required maxlength="40" value="${esc(m.nombre)}" placeholder="Ej. Tenencia, seguro del auto, predial…"`)}
+    <div class="grid2">
+      ${campo('¿Cuánto cuesta?', `name="objetivo" type="number" inputmode="decimal" min="1" step="0.01" required value="${m.objetivo}"`)}
+      <label class="campo">¿En qué mes se paga?<select name="mes">${MESES.map((n, i) => `<option value="${i + 1}" ${i + 1 === mes ? 'selected' : ''}>${n[0].toUpperCase() + n.slice(1)}</option>`).join('')}</select></label>
+    </div>
+    <label class="campo">Categoría del gasto<select name="cat">${opciones(CATS_GASTO, m.cat || 'Otros gastos')}</select></label>
+    ${meta ? '' : campo('Ya tengo apartado', 'name="inicial" type="number" inputmode="decimal" min="0" step="0.01" value="0"')}
+    <p class="hint">Se repite cada año: al marcarlo como pagado pasa al año siguiente.</p>
+    ${meta ? `<button type="button" class="btn mini peligro" data-action="borrar-meta" data-id="${meta.id}">Eliminar</button>` : ''}
+  `, d => {
+    const datos = { nombre: d.nombre.trim(), objetivo: num(d.objetivo), fechaMeta: proximoMes(+d.mes), cat: d.cat, anual: true };
+    if (datos.objetivo <= 0) return toast('Indica cuánto cuesta'), false;
+    if (meta) Object.assign(meta, datos); else S.metas.push({ id: uid(), ...datos, inicial: num(d.inicial) });
+    toast('📅 Gasto del año guardado');
+  });
+}
+
+// Pagar un gasto del año: sale del apartado (regresa a la cuenta) y se registra el gasto
+function formPagarPrevision(m) {
+  const acc = acumuladoMeta(m);
+  dialogo(`Pagar ${m.nombre}`, `
+    ${campo('Monto pagado', `name="monto" type="number" inputmode="decimal" min="0.01" step="0.01" required value="${m.objetivo}"`, `Tenías apartado ${fmt(acc)}`)}
+    <label class="campo">¿Con qué pagaste?<select name="medio">${opcionesMedio(medioDefault(true))}</select></label>
+    ${campo('Fecha', `name="fecha" type="date" required value="${hoyISO()}"`)}
+  `, d => {
+    const monto = num(d.monto);
+    if (monto <= 0) return toast('Ingresa un monto válido'), false;
+    const usado = Math.min(acc, monto);
+    const cuenta = d.medio.startsWith('c:') ? d.medio.slice(2) : cuentaDefault();
+    if (usado > 0) S.movs.push({ id: uid(), tipo: 'ahorro', monto: -usado, cat: m.nombre, metaId: m.id, fecha: d.fecha, nota: 'Uso del apartado', cuentaId: cuenta });
+    const g = { id: uid(), tipo: 'gasto', monto, cat: m.cat || 'Otros gastos', fecha: d.fecha, nota: m.nombre };
+    aplicarMedio(g, d.medio); S.movs.push(g); syncCargo(g);
+    m.fechaMeta = sumarMeses(m.fechaMeta, 12);
+    toast(`✅ ${m.nombre} pagado. Próximo: ${nombrePeriodo(m.fechaMeta)}`);
+  }, 'Registrar pago');
 }
 
 function htmlCuentas() {
@@ -794,14 +906,17 @@ const VISTAS = {
       <div class="kpi"><div class="lbl">Total ahorrado</div><div class="val c-ahorro">${fmt(total)}</div></div>
       <div class="kpi"><div class="lbl">Gasto mensual prom.</div><div class="val">${fmt(gastoProm)}</div></div>
     </div>`;
-    if (!S.metas.length) {
+    html += htmlPrevisiones();
+    const metas = S.metas.filter(m => !m.anual);
+    html += '<h2 class="seccion">🐷 Metas de ahorro</h2>';
+    if (!metas.length) {
       return html + `<div class="card vacio"><div class="big">🐷</div><p>Aún no tienes metas de ahorro.<br>Te recomiendo empezar por un fondo de emergencia.</p>
         <div class="acciones" style="justify-content:center">
           <button class="btn" data-action="meta-emergencia">Crear fondo de emergencia</button>
           <button class="btn sec" data-action="nueva-meta">Otra meta</button>
         </div></div>`;
     }
-    for (const m of S.metas) {
+    for (const m of metas) {
       const acc = acumuladoMeta(m);
       const p = m.objetivo ? acc / m.objetivo : 0;
       let extra = '';
@@ -1488,7 +1603,9 @@ const ACCIONES = {
     const g = promedioGastoMensual();
     formMeta(null, { nombre: 'Fondo de emergencia', objetivo: g ? Math.round(g * 3) : '', inicial: 0, hint: g ? `Sugerido: 3 meses de gastos (${fmt(g * 3)}). Ideal: 6 meses (${fmt(g * 6)}).` : 'Sugerido: de 3 a 6 meses de tus gastos mensuales.' });
   },
-  'editar-meta': el => formMeta(buscarId(S.metas, el.dataset.id)),
+  'editar-meta': el => { const m = buscarId(S.metas, el.dataset.id); m.anual ? formPrevision(m) : formMeta(m); },
+  'nueva-prevision': el => formPrevision(null, { nombre: el.dataset.nombre, mes: el.dataset.mes }),
+  'pagar-prevision': el => formPagarPrevision(buscarId(S.metas, el.dataset.id)),
   'borrar-meta': el => {
     const m = buscarId(S.metas, el.dataset.id);
     $('#dlg').close();

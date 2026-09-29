@@ -1,8 +1,14 @@
 // Versión de la app. Súbela en cada cambio publicado: la usan app.js (pantalla y avisos)
 // y sw.js (nombre de la caché, para que la app instalada descargue la versión nueva).
-const VERSION = '1.8.0';
+const VERSION = '1.9.0';
 
 const NOVEDADES = [
+  { v: '1.9.0', fecha: '2026-09-29', cambios: [
+    'Ahorro → Gastos del año: tenencia, seguro, predial, inscripciones, regalos… con cuánto apartar por quincena.',
+    '"Ya lo pagué" usa lo apartado, registra el gasto y lo pasa al año siguiente.',
+    'La proyección de quincenas incluye lo que toca apartar.',
+    'El asesor te sugiere cómo usar el aguinaldo.',
+  ] },
   { v: '1.8.0', fecha: '2026-09-29', cambios: [
     'Próximas quincenas: proyección de las siguientes 6 quincenas con lo que entra, lo que sale y cuánto te quedará.',
     'Aviso anticipado cuando una quincena futura se ve apretada.',
