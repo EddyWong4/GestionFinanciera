@@ -992,8 +992,8 @@ const VISTAS = {
         <div class="tendencia">
           ${tots.map((x, i) => `<div class="col">
             <div class="pair">
-              <span style="height:${x.ingreso / maxT * 100}%;background:var(--ingreso)" title="Ingresos ${fmt(x.ingreso)}"></span>
-              <span style="height:${x.salidas / maxT * 100}%;background:var(--gasto)" title="Salidas ${fmt(x.salidas)}"></span>
+              <span style="height:${x.ingreso / maxT * 100}%;background:var(--ingreso)"></span>
+              <span style="height:${x.salidas / maxT * 100}%;background:var(--gasto)"></span>
             </div>
             <div class="lbl">${nombrePeriodo(ult[i], true)}</div>
           </div>`).join('')}
@@ -1231,7 +1231,7 @@ function htmlReportes() {
         <div><span class="small muted">Lo que tienes</span><b class="c-ingreso">${fmt(pat.A)}</b>${lineas(pat.activos)}</div>
         <div><span class="small muted">Lo que debes</span><b class="c-deuda">${fmt(pat.P)}</b>${lineas(pat.pasivos)}</div>
       </div>
-      ${hist.length > 1 ? `<div class="tendencia">${hist.map(([m, v]) => `<div class="col"><div class="pair"><span style="width:60%;max-width:26px;height:${Math.abs(v) / maxH * 100}%;background:${v < 0 ? 'var(--deuda)' : 'var(--ahorro)'}" title="${fmt(v)}"></span></div><div class="lbl">${nombreMes(m)}</div></div>`).join('')}</div>`
+      ${hist.length > 1 ? `<div class="tendencia">${hist.map(([m, v]) => `<div class="col"><div class="pair"><span style="width:60%;max-width:26px;height:${Math.abs(v) / maxH * 100}%;background:${v < 0 ? 'var(--deuda)' : 'var(--ahorro)'}"></span></div><div class="lbl">${nombreMes(m)}</div></div>`).join('')}</div>`
         : '<p class="small muted" style="margin-bottom:0">La app guarda una foto de tu patrimonio cada mes; aquí verás cómo cambia.</p>'}
     </section>
 
@@ -1245,8 +1245,8 @@ function htmlReportes() {
     <section class="card">
       <h2>📅 Tu ${y}</h2>
       <div class="tendencia">${tm.map((t, i) => `<div class="col"><div class="pair">
-        <span style="height:${t.ingreso / maxM * 100}%;background:var(--ingreso)" title="Ingresos ${fmt(t.ingreso)}"></span>
-        <span style="height:${t.gasto / maxM * 100}%;background:var(--gasto)" title="Gastos ${fmt(t.gasto)}"></span>
+        <span style="height:${t.ingreso / maxM * 100}%;background:var(--ingreso)"></span>
+        <span style="height:${t.gasto / maxM * 100}%;background:var(--gasto)"></span>
       </div><div class="lbl">${MESES[i][0].toUpperCase()}</div></div>`).join('')}</div>
       <div class="leyenda"><span><i style="background:var(--ingreso)"></i>Ingresos ${fmt(anual.ing)}</span><span><i style="background:var(--gasto)"></i>Gastos ${fmt(anual.gas)}</span></div>
       ${topCat.length ? `<p class="dia">En qué se fue tu dinero</p>${topCat.map(([c, v]) => `<div class="bar-row"><div class="row"><span>${esc(c)}</span><span><b>${fmt(v)}</b> <span class="meta">${pct(v / anual.gas)}</span></span></div><div class="bar"><span style="width:${v / topCat[0][1] * 100}%;background:var(--gasto)"></span></div></div>`).join('')}` : ''}
@@ -1491,10 +1491,8 @@ function formMov(mov) {
     <label class="campo">Categoría<select name="cat" id="sel-cat">${opciones(catsDe(m.tipo), m.cat)}</select></label>
     <label class="campo"><span id="lbl-medio">${lblMedio(m.tipo)}</span><select name="medio" id="sel-medio">${opcionesMedio(medio, m.tipo === 'gasto')}</select>
       <span class="hint" id="hint-medio" ${medio.startsWith('t:') ? '' : 'hidden'}>Con tarjeta de crédito: cuenta como gasto y sube el saldo de la tarjeta, pero no descuenta de tus cuentas hasta que pagues la tarjeta.</span></label>
-    <div class="grid2">
-      ${campo('Fecha', `name="fecha" type="date" required value="${m.fecha}"`)}
-      ${campo('Nota (opcional)', `name="nota" maxlength="80" value="${esc(m.nota)}"`)}
-    </div>
+    ${campo('Fecha', `name="fecha" type="date" required value="${m.fecha}"`)}
+    ${campo('Nota (opcional)', `name="nota" maxlength="80" value="${esc(m.nota)}" placeholder="Ej. comida con Ana"`)}
     ${campo('Etiquetas (opcional)', `name="tags" maxlength="80" list="tags-usadas" value="${esc((m.tags || []).join(', '))}" placeholder="Ej. viaje, trabajo, bebé"`, 'Sepáralas con comas. Sirven para buscar y saber cuánto gastaste en algo.')}
     <datalist id="tags-usadas">${etiquetasUsadas().map(t => `<option value="${esc(t)}">`).join('')}</datalist>
     <p class="hint">¿Ahorro, pago de tarjeta o traspaso entre cuentas? Regístralos desde Ahorro, Deudas o "Mis cuentas".</p>
@@ -1529,7 +1527,7 @@ function formCuenta(cuenta) {
     <label class="campo">Tipo<select name="tipo">${Object.entries(TIPOS_CUENTA).map(([k, v]) => `<option value="${k}" ${k === c.tipo ? 'selected' : ''}>${ICON_CUENTA[k]} ${v}</option>`).join('')}</select></label>
     ${campo(cuenta ? 'Saldo real hoy' : 'Saldo actual', `name="saldo" type="number" inputmode="decimal" step="0.01" required value="${saldo === '' ? '' : saldo.toFixed(2)}"`,
       cuenta ? 'Si no coincide con tu banco, escribe el saldo real y la app se ajusta.' : 'Lo que tienes hoy en esta cuenta.')}
-    ${cuenta && S.cuentas.length > 1 ? `<button type="button" class="btn mini peligro" data-action="borrar-cuenta" data-id="${cuenta.id}" ${usada ? 'disabled title="Tiene movimientos"' : ''}>Eliminar cuenta</button>
+    ${cuenta && S.cuentas.length > 1 ? `<button type="button" class="btn mini peligro" data-action="borrar-cuenta" data-id="${cuenta.id}" ${usada ? 'disabled' : ''}>Eliminar cuenta</button>
       ${usada ? '<p class="hint">No se puede eliminar porque tiene movimientos.</p>' : ''}` : ''}
   `, d => {
     const nuevo = num(d.saldo);
@@ -1901,6 +1899,7 @@ const ACCIONES = {
   'buscar-actualizacion': buscarActualizacion,
   'ver-novedades': () => mostrarNovedades(null),
   'actualizar-ya': () => location.reload(),
+  'cerrar-banner': () => $('#banner-act')?.remove(),
   'per-hoy': () => { per = periodoDe(hoyISO()); render(); },
   'nuevo-fijo': () => formFijo(),
   'editar-fijo': el => {
@@ -2259,29 +2258,40 @@ function registrarSW() {
     document.addEventListener('visibilitychange', () => { if (!document.hidden) reg.update().catch(() => {}); });
   }).catch(() => {});
   // Se instaló una versión nueva mientras la app estaba abierta
-  navigator.serviceWorker.addEventListener('controllerchange', () => { if (teniaControl) bannerActualizacion(); });
+  // Solo avisa si la versión instalada es más nueva que la que se está viendo
+  // (con "red primero" casi siempre ya estás en la última y el aviso sobraba)
+  navigator.serviceWorker.addEventListener('controllerchange', async () => {
+    if (!teniaControl) return;
+    const remota = await versionPublicada();
+    if (remota && compararVersion(remota, VERSION) > 0) bannerActualizacion(remota);
+  });
+}
+async function versionPublicada() {
+  try {
+    const txt = await (await fetch('version.js?t=' + Date.now(), { cache: 'no-store' })).text();
+    return (txt.match(/VERSION = '([0-9.]+)'/) || [])[1] || null;
+  } catch { return null; }
 }
 
 function bannerActualizacion(v) {
   if ($('#banner-act')) return;
   const b = document.createElement('div');
   b.id = 'banner-act';
-  b.innerHTML = `<span>🔄 Hay una versión nueva${v ? ' (v' + esc(v) + ')' : ''} lista.</span><button class="btn mini" data-action="actualizar-ya">Actualizar</button>`;
+  b.innerHTML = `<span>🔄 Hay una versión nueva${v ? ' (v' + esc(v) + ')' : ''} lista.</span>
+    <span style="display:flex;gap:4px;align-items:center"><button class="btn mini" data-action="actualizar-ya">Actualizar</button>
+    <button class="cerrar-banner" data-action="cerrar-banner" aria-label="Cerrar aviso">✕</button></span>`;
   document.body.append(b);
 }
 
 async function buscarActualizacion() {
   if (!navigator.onLine) return toast('Sin internet: conéctate para buscar actualizaciones');
   toast('Buscando actualización…');
-  try {
-    const txt = await (await fetch('version.js?t=' + Date.now(), { cache: 'no-store' })).text();
-    const remota = (txt.match(/VERSION = '([0-9.]+)'/) || [])[1];
-    if (!remota) throw new Error();
-    if (compararVersion(remota, VERSION) > 0) {
-      await swReg?.update().catch(() => {});
-      bannerActualizacion(remota);
-      toast(`Hay una versión nueva: v${remota}`);
-    } else toast(`✅ Tienes la versión más reciente (v${VERSION})`);
-  } catch { toast('No se pudo revisar. Intenta más tarde.'); }
+  const remota = await versionPublicada();
+  if (!remota) return toast('No se pudo revisar. Intenta más tarde.');
+  if (compararVersion(remota, VERSION) > 0) {
+    await swReg?.update().catch(() => {});
+    bannerActualizacion(remota);
+    toast(`Hay una versión nueva: v${remota}`);
+  } else toast(`✅ Tienes la versión más reciente (v${VERSION})`);
 }
 iniciar();

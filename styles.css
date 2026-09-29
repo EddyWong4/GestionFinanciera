@@ -187,9 +187,13 @@ label.campo input, label.campo select, label.campo textarea {
   display: block; width: 100%; margin-top: 4px; padding: 10px 12px;
   border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--text);
   font: inherit; font-size: 16px; font-weight: 400;
+  min-width: 0; max-width: 100%; box-sizing: border-box;
 }
+/* Los campos de fecha traen un ancho mínimo propio: sin esto se encimaban con el de al lado */
+label.campo input[type=date], label.campo input[type=month] { -webkit-appearance: none; appearance: none; min-height: 44px; }
 label.campo input:focus, label.campo select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; }
+.grid2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0 10px; }
+.grid2 > * { min-width: 0; }
 label.check { display: flex; gap: 8px; align-items: center; font-size: .9rem; margin: 6px 0 12px; }
 .segmento { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 12px; }
 .segmento input { position: absolute; opacity: 0; pointer-events: none; }
@@ -291,3 +295,4 @@ h2.seccion:first-of-type { margin-top: 4px; }
 /* Compras a meses */
 .msi { border-top: 1px solid var(--line); padding: 12px 0 4px; margin-top: 10px; }
 .msi .badge { vertical-align: 1px; }
+.cerrar-banner { background: none; border: 0; color: #fff; font-size: 1.1rem; padding: 4px 6px; cursor: pointer; opacity: .8; }
