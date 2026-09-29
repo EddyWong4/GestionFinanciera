@@ -296,3 +296,10 @@ h2.seccion:first-of-type { margin-top: 4px; }
 .msi { border-top: 1px solid var(--line); padding: 12px 0 4px; margin-top: 10px; }
 .msi .badge { vertical-align: 1px; }
 .cerrar-banner { background: none; border: 0; color: #fff; font-size: 1.1rem; padding: 4px 6px; cursor: pointer; opacity: .8; }
+
+/* Fijos semanales agrupados: un renglón con las fechas de la quincena */
+.ic-sem { flex: none; width: 28px; text-align: center; font-size: 1.1rem; }
+.dias-sem { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+.dia-sem { border: 1px solid var(--line); background: var(--bg); color: var(--text); border-radius: 99px; padding: 3px 9px; font: inherit; font-size: .75rem; cursor: pointer; }
+.dia-sem.on { background: var(--ingreso); border-color: var(--ingreso); color: #fff; }
+.monto .por { display: block; font-weight: 400; font-size: .72rem; text-align: right; }

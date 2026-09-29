@@ -765,11 +765,21 @@ function formPagarPrevision(m) {
 /* ---------- Próximos pagos (recordatorios dentro de la app) ---------- */
 const isoLocal = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 function fechaDelMes(ym, dia) { return `${ym}-${String(Math.min(dia, diasDelMes(ym))).padStart(2, '0')}`; }
-function proximosPagos(dias = 7) {
+// Etiqueta de urgencia para pagos pendientes: "· vence mañana" (en rojo si faltan 2 días o menos)
+function venceTexto(fecha, corto = false) {
+  const n = Math.round((new Date(fecha + 'T12:00') - new Date(hoyISO() + 'T12:00')) / 864e5);
+  if (n < 0 || n > 3) return '';
+  const txt = n === 0 ? 'hoy' : n === 1 ? 'mañana' : `en ${n} días`;
+  return corto ? ` · ${txt}` : ` · <b style="color:${n <= 2 ? 'var(--deuda)' : 'var(--warn)'}">vence ${txt}</b>`;
+}
+// excluirActual: omite lo que ya está en "Fijos de la quincena" para no mostrarlo dos veces
+function proximosPagos(dias = 7, excluirActual = false) {
   const hoy = hoyISO(), lim = isoLocal(new Date(Date.now() + dias * 864e5));
   const ymHoy = hoy.slice(0, 7), ymSig = sumarMeses(ymHoy, 1);
   const out = [];
-  const add = (fecha, nombre, monto, extra = {}) => { if (fecha >= hoy && fecha <= lim) out.push({ fecha, nombre, monto, ...extra }); };
+  // Lo que cae en el periodo que se está viendo ya aparece en "Fijos de la quincena"
+  const rVista = rango(per), yaVisible = f => excluirActual && enRango(hoy, rVista) && enRango(f, rVista);
+  const add = (fecha, nombre, monto, extra = {}) => { if (fecha >= hoy && fecha <= lim && (extra.anual || !yaVisible(fecha))) out.push({ fecha, nombre, monto, ...extra }); };
   // Tarjetas y préstamos: pagado si hay un pago en los 25 días previos al vencimiento
   for (const d of deudasActivas().filter(d => d.diaPago)) for (const ym of [ymHoy, ymSig]) {
     const f = fechaDelMes(ym, d.diaPago), desde = isoLocal(new Date(new Date(f + 'T12:00') - 25 * 864e5));
@@ -780,24 +790,24 @@ function proximosPagos(dias = 7) {
     const k = mesesEntre(c.primerMes, ym);
     if (k >= 0 && k < c.meses && !msiPagadaEn(c, ym)) add(fechaDelMes(ym, c.diaPago || 1), `🛍️ ${c.nombre} (${k + 1}/${c.meses})`, mensualidad(c), { accion: 'marcar-msi', id: c.id, mes: ym, q: `${ym}-${(c.diaPago || 1) <= 15 ? 1 : 2}` });
   }
-  // Gastos fijos con fecha (mensuales y semanales) que aún no marcas
-  for (const q of [qActual(), moverPeriodo(qActual(), 1)]) for (const { f, fecha, mov } of compromisos(q)[0].fijos) {
-    if (mov || f.tipo !== 'gasto') continue;
-    const cuando = fecha || (f.cuando === 'mensual' || f.cuando === 'q1' || f.cuando === 'q2' ? fechaDelMes(q.slice(0, 7), diaMensual(f)) : null);
-    if (cuando) add(cuando, `📌 ${f.nombre}`, f.monto);
+  // Gastos fijos mensuales que aún no marcas (los semanales son rutina: se marcan en "Fijos", no son vencimientos)
+  for (const q of [qActual(), moverPeriodo(qActual(), 1)]) for (const { f, mov } of compromisos(q)[0].fijos) {
+    if (mov || f.tipo !== 'gasto' || !['mensual', 'q1', 'q2'].includes(f.cuando)) continue;
+    add(fechaDelMes(q.slice(0, 7), diaMensual(f)), `📌 ${f.nombre}`, f.monto);
   }
   // Gastos del año que se pagan en estos días y no están cubiertos
-  for (const m of previsiones()) if (faltaPrevision(m) > 0) add(`${m.fechaMeta}-01`, `📅 ${m.nombre}`, m.objetivo, { falta: faltaPrevision(m) });
+  for (const m of previsiones()) if (faltaPrevision(m) > 0) add(`${m.fechaMeta}-01`, `📅 ${m.nombre}`, m.objetivo, { falta: faltaPrevision(m), anual: true });
   return out.sort((a, b) => a.fecha.localeCompare(b.fecha));
 }
 function htmlProximosPagos() {
-  const lista = proximosPagos();
+  const lista = proximosPagos(7, true);
   if (!lista.length) return '';
   const hoy = new Date(hoyISO() + 'T12:00');
   const cuando = f => { const n = Math.round((new Date(f + 'T12:00') - hoy) / 864e5); return n === 0 ? 'Hoy' : n === 1 ? 'Mañana' : `En ${n} días`; };
   const total = lista.reduce((a, x) => a + x.monto, 0);
   return `<section class="card">
     <h2>⏰ Próximos pagos <span class="muted small">(7 días)</span></h2>
+    <p class="small muted" style="margin-top:-6px">Lo de ${esMes() ? 'este mes' : 'esta quincena'} está en "Fijos" con su aviso de vencimiento; aquí va lo que sigue.</p>
     <ul class="lista">${lista.map(x => {
       const n = Math.round((new Date(x.fecha + 'T12:00') - hoy) / 864e5);
       return `<li><div class="info"><b>${esc(x.nombre)}</b><span class="small" style="color:${n <= 2 ? 'var(--deuda)' : 'var(--muted)'}">${cuando(x.fecha)} · ${fechaCorta(x.fecha).slice(0, -5)}${x.falta ? ` · te faltan ${fmt(x.falta)}` : ''}</span></div>
@@ -846,24 +856,41 @@ function htmlCompromisos(pend, proyectado) {
 
   let nPend = 0;
   const cuerpo = bloques.map(b => {
-    const items = b.fijos.map(({ f, fecha, clave, mov }) => {
-      if (!mov) nPend++;
+    const ym = b.q.slice(0, 7);
+    // Un renglón por fijo: los semanales juntan sus fechas de la quincena como botones
+    const grupos = [];
+    for (const o of b.fijos) { const g = grupos.find(x => x.f === o.f); if (g) g.ocs.push(o); else grupos.push({ f: o.f, ocs: [o] }); }
+    const items = grupos.map(({ f, ocs }) => {
       const ing = f.tipo === 'ingreso';
+      const pend = ocs.filter(o => !o.mov).length;
+      nPend += pend;
+      if (f.cuando === 'semanal') {
+        const total = ocs.reduce((a, o) => a + (o.mov ? o.mov.monto : f.monto), 0);
+        return `<li class="${pend ? '' : 'hecho'}">
+          <span class="ic-sem">🔁</span>
+          <div class="info"><b>${esc(f.nombre)}</b><span class="muted small">${ing ? 'Ingreso' : esc(f.cat)} · cada ${DIAS[f.diaSemana]} · ${ocs.length === 1 ? '1 vez' : `${ocs.length} veces`} esta quincena</span>
+            <span class="dias-sem">${ocs.map(o => `<button class="dia-sem ${o.mov ? 'on' : ''}" data-action="marcar-fijo" data-id="${f.id}" data-q="${b.q}" data-fecha="${o.fecha}" aria-label="${o.mov ? 'Desmarcar' : 'Marcar'} ${DIAS[f.diaSemana]} ${+o.fecha.slice(8, 10)}">${o.mov ? '✓ ' : ''}${DIAS[f.diaSemana].slice(0, 3)} ${+o.fecha.slice(8, 10)}${o.mov ? '' : venceTexto(o.fecha, true)}</button>`).join('')}</span></div>
+          <span class="monto ${ing ? 'c-ingreso' : 'c-gasto'}">${ing ? '+' : '−'} ${fmt(total)}${ocs.length > 1 ? `<span class="muted small por">${ocs.length} × ${fmt(f.monto)}</span>` : ''}</span>
+          <button class="link-btn" data-action="editar-fijo" data-id="${f.id}" data-q="${b.q}" aria-label="Editar fijo">✏️</button>
+        </li>`;
+      }
+      const { clave, mov } = ocs[0];
+      const vence = f.cuando === 'cada' ? '' : venceTexto(fechaDelMes(ym, diaMensual(f)));
       return `<li class="${mov ? 'hecho' : ''}">
-        <button class="check-btn ${mov ? 'on' : ''}" data-action="marcar-fijo" data-id="${f.id}" data-q="${b.q}" data-fecha="${fecha || ''}" aria-label="${mov ? 'Desmarcar' : 'Marcar como ' + (ing ? 'recibido' : 'pagado')}">${mov ? '✓' : ''}</button>
-        <div class="info"><b>${esc(f.nombre)}${fecha ? ` <span class="badge sem">${DIAS[f.diaSemana].slice(0, 3)} ${+fecha.slice(8, 10)}</span>` : ''}</b><span class="muted small">${ing ? 'Ingreso' : esc(f.cat)}${cuandoTexto(f) ? ' · ' + cuandoTexto(f) : ''}${mov ? ` · ${ing ? 'recibido' : 'pagado'} ${fechaCorta(mov.fecha)}` : ''}</span></div>
+        <button class="check-btn ${mov ? 'on' : ''}" data-action="marcar-fijo" data-id="${f.id}" data-q="${b.q}" data-fecha="" aria-label="${mov ? 'Desmarcar' : 'Marcar como ' + (ing ? 'recibido' : 'pagado')}">${mov ? '✓' : ''}</button>
+        <div class="info"><b>${esc(f.nombre)}</b><span class="muted small">${ing ? 'Ingreso' : esc(f.cat)}${cuandoTexto(f) ? ' · ' + cuandoTexto(f) : ''}${mov ? ` · ${ing ? 'recibido' : 'pagado'} ${fechaCorta(mov.fecha)}` : vence}</span></div>
         <span class="monto ${ing ? 'c-ingreso' : 'c-gasto'}">${ing ? '+' : '−'} ${fmt(mov ? mov.monto : f.monto)}</span>
-        <button class="link-btn" data-action="editar-fijo" data-id="${f.id}" data-clave="${clave}" data-etiqueta="${fecha ? fechaCorta(fecha).slice(0, -5) : nombrePeriodo(clave, true)}" data-pagado="${mov ? 1 : 0}" aria-label="Editar fijo">✏️</button>
+        <button class="link-btn" data-action="editar-fijo" data-id="${f.id}" data-clave="${clave}" data-etiqueta="${nombrePeriodo(clave, true)}" data-pagado="${mov ? 1 : 0}" aria-label="Editar fijo">✏️</button>
       </li>`;
     }).concat(b.tarjetas.map(({ d, pagado }) => `<li class="${pagado ? 'hecho' : ''}">
         <button class="check-btn ${pagado ? 'on' : ''}" data-action="pagar-deuda" data-id="${d.id}" aria-label="Registrar pago de ${esc(d.nombre)}" ${pagado ? 'disabled' : ''}>${pagado ? '✓' : ''}</button>
-        <div class="info"><b>💳 ${esc(d.nombre)}</b><span class="muted small">Pago mínimo · vence día ${d.diaPago}</span></div>
+        <div class="info"><b>💳 ${esc(d.nombre)}</b><span class="muted small">Pago mínimo · vence día ${d.diaPago}${pagado ? '' : venceTexto(fechaDelMes(ym, d.diaPago))}</span></div>
         <span class="monto c-deuda">− ${fmt(Math.min(d.minimo, saldoDeuda(d)))}</span>
       </li>`)).concat(b.meses.map(({ c, ym, pagado }) => {
         const previa = mesesEntre(c.primerMes, ym) < c.inicial;
         return `<li class="${pagado ? 'hecho' : ''}">
         <button class="check-btn ${pagado ? 'on' : ''}" data-action="marcar-msi" data-id="${c.id}" data-mes="${ym}" data-q="${b.q}" aria-label="${pagado ? 'Desmarcar' : 'Marcar mensualidad pagada'}" ${previa ? 'disabled' : ''}>${pagado ? '✓' : ''}</button>
-        <div class="info"><b>🛍️ ${esc(c.nombre)}</b><span class="muted small">${c.tasa ? 'A meses' : 'MSI'} · mensualidad ${mesesEntre(c.primerMes, ym) + 1} de ${c.meses} · día ${c.diaPago}</span></div>
+        <div class="info"><b>🛍️ ${esc(c.nombre)}</b><span class="muted small">${c.tasa ? 'A meses' : 'MSI'} · mensualidad ${mesesEntre(c.primerMes, ym) + 1} de ${c.meses} · día ${c.diaPago}${pagado ? '' : venceTexto(fechaDelMes(ym, c.diaPago || 1))}</span></div>
         <span class="monto c-deuda">− ${fmt(mensualidad(c))}</span>
       </li>`;
       })).join('');
@@ -1566,7 +1593,8 @@ function formFijo(fijo, occ) {
   const f = fijo ? { ...fijo } : { tipo: 'gasto', nombre: '', monto: '', cat: 'Vivienda', cuando: 'mensual', dia: '', diaSemana: 6 };
   if (f.cuando === 'q1' || f.cuando === 'q2') { f.dia = diaMensual(f); f.cuando = 'mensual'; } // formato anterior
   const semanal = f.cuando === 'semanal', mensual = f.cuando === 'mensual';
-  const puedeOmitir = fijo && occ && !occ.pagado;
+  // Fechas que se pueden quitar solo una vez (los semanales traen varias en la quincena)
+  const omitibles = !fijo || !occ ? [] : occ.lista || (occ.pagado ? [] : [occ]);
   const catsGasto = CATS_GASTO;
   const medio = medioValido(f.medio) ? f.medio : medioDefault(f.tipo === 'ingreso');
   dialogo(fijo ? 'Editar fijo' : 'Nuevo gasto o ingreso fijo', `
@@ -1589,7 +1617,7 @@ function formFijo(fijo, occ) {
     <label class="campo" id="campo-cat" ${f.tipo === 'ingreso' ? 'hidden' : ''}>Categoría<select name="cat">${opciones(catsGasto, f.cat)}</select></label>
     <label class="campo"><span id="lbl-medio-f">${f.tipo === 'ingreso' ? '¿A qué cuenta entra?' : '¿Con qué se paga?'}</span><select name="medio" id="sel-medio-f">${opcionesMedio(medio, f.tipo === 'gasto')}</select></label>
     ${fijo ? `<div class="acciones">
-      ${puedeOmitir ? `<button type="button" class="btn mini sec" data-action="omitir-fijo" data-id="${fijo.id}" data-clave="${occ.clave}">Quitar solo esta vez (${occ.etiqueta})</button>` : ''}
+      ${omitibles.map(o => `<button type="button" class="btn mini sec" data-action="omitir-fijo" data-id="${fijo.id}" data-clave="${o.clave}">Quitar solo ${omitibles.length > 1 ? 'el ' : 'esta vez: '}${o.etiqueta}</button>`).join('')}
       <button type="button" class="btn mini peligro" data-action="borrar-fijo" data-id="${fijo.id}">Eliminar para siempre</button>
     </div>` : ''}
   `, d => {
@@ -1903,8 +1931,14 @@ const ACCIONES = {
   'per-hoy': () => { per = periodoDe(hoyISO()); render(); },
   'nuevo-fijo': () => formFijo(),
   'editar-fijo': el => {
-    const { clave, etiqueta, pagado } = el.dataset;
-    formFijo(buscarId(S.fijos, el.dataset.id), clave ? { clave, etiqueta, pagado: pagado === '1' } : null);
+    const f = buscarId(S.fijos, el.dataset.id);
+    const { clave, etiqueta, pagado, q } = el.dataset;
+    if (f.cuando === 'semanal' && q) {
+      const lista = compromisos(q)[0].fijos.filter(o => o.f === f && !o.mov)
+        .map(o => ({ clave: o.clave, etiqueta: `${DIAS[f.diaSemana].slice(0, 3)} ${+o.fecha.slice(8, 10)}` }));
+      return formFijo(f, { lista });
+    }
+    formFijo(f, clave ? { clave, etiqueta, pagado: pagado === '1' } : null);
   },
   'omitir-fijo': el => {
     const f = buscarId(S.fijos, el.dataset.id);
