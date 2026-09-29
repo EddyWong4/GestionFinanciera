@@ -38,7 +38,8 @@ self.addEventListener('fetch', e => {
     try {
       const limite = new Promise((_, no) => setTimeout(() => no(new Error('lento')), 4000));
       const r = await Promise.race([fetch(e.request.url, { cache: 'no-cache' }), limite]);
-      if (r.ok) cache.put(e.request, r.clone());
+      // Las consultas con ?t=… (buscar actualización) no se guardan
+      if (r.ok && !new URL(e.request.url).search) cache.put(e.request, r.clone());
       return r;
     } catch {
       return (await cache.match(e.request, { ignoreSearch: true }))
