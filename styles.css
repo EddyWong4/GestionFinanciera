@@ -263,6 +263,16 @@ table.proy tr.det td { font-size: .72rem; color: var(--muted); padding-top: 2px;
   box-shadow: 0 6px 16px rgba(0,0,0,.3); font-size: .9rem; max-width: 520px; margin: 0 auto;
 }
 
+/* Búsqueda y etiquetas */
+.buscador { margin-bottom: 10px; }
+.buscador input, .buscador select {
+  width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--card); color: var(--text); font: inherit; font-size: 16px;
+}
+.buscador select { font-size: .85rem; padding: 8px 10px; }
+.tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
+.tag { border: 0; background: var(--accent-soft); color: var(--accent); border-radius: 99px; padding: 1px 8px; font-size: .72rem; font-weight: 600; cursor: pointer; }
+
 /* Bloqueo con PIN */
 body.bloqueada main, body.bloqueada .fab, body.bloqueada .tabbar, body.bloqueada .mes-nav, body.bloqueada #banner-act { visibility: hidden; }
 #bloqueo { position: fixed; inset: 0; z-index: 50; background: var(--bg); display: grid; place-items: center; padding: 24px; }

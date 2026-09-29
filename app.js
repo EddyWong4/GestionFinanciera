@@ -828,6 +828,56 @@ function htmlCompromisos(pend, proyectado) {
   </section>`;
 }
 
+/* ---------- Movimientos: búsqueda, filtros y etiquetas ---------- */
+let busqueda = '', filtroCat = '', filtroTag = '';
+const sinAcentos = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+const etiquetasUsadas = () => [...new Set(S.movs.flatMap(m => m.tags || []))].sort((a, b) => a.localeCompare(b, 'es'));
+const leerEtiquetas = txt => [...new Set(String(txt || '').split(/[,#]/).map(t => t.trim().toLowerCase()).filter(Boolean))];
+
+function htmlListaMovs() {
+  // Con texto de búsqueda se busca en todos los movimientos; si no, solo en el periodo
+  const q = sinAcentos(busqueda.trim());
+  let lista = q || filtroTag ? [...S.movs] : movsPer(per);
+  if (filtroMov !== 'todos') lista = lista.filter(x => x.tipo === filtroMov);
+  if (filtroCat) lista = lista.filter(x => x.cat === filtroCat);
+  if (filtroTag) lista = lista.filter(x => (x.tags || []).includes(filtroTag));
+  if (q) lista = lista.filter(x => sinAcentos([x.cat, x.nota, nombreMedio(x), (x.tags || []).join(' '), x.monto, fmt(x.monto)].join(' ')).includes(q));
+  lista.sort((a, b) => b.fecha.localeCompare(a.fecha) || b.id.localeCompare(a.id));
+  const global = q || filtroTag;
+
+  if (!lista.length) return global || filtroCat
+    ? `<div class="card vacio"><div class="big">🔍</div><p>Sin resultados${global ? '' : ` en la ${nombrePeriodo(per)}`}.</p></div>`
+    : `<div class="card vacio"><div class="big">🧾</div><p>No hay movimientos en la ${nombrePeriodo(per)}.</p><button class="btn" data-action="nuevo-mov">Registrar el primero</button></div>`;
+
+  // Totales de lo filtrado: útil para "¿cuánto gasté en #viaje?"
+  const tot = lista.reduce((a, x) => { if (x.tipo === 'gasto') a.g += x.monto; else if (x.tipo === 'ingreso') a.i += x.monto; return a; }, { g: 0, i: 0 });
+  let html = `<p class="small muted" style="margin:0 4px 8px">${lista.length} movimiento${lista.length === 1 ? '' : 's'}${global ? ' (en todas las fechas)' : ''}${tot.g ? ` · gastos ${fmt(tot.g)}` : ''}${tot.i ? ` · ingresos ${fmt(tot.i)}` : ''}</p>
+    <div class="card" style="padding-top:4px">`;
+  let dia = '';
+  for (const x of lista) {
+    if (x.fecha !== dia) { if (dia) html += '</ul>'; dia = x.fecha; html += `<p class="dia">${fechaCorta(dia)}</p><ul class="lista">`; }
+    const traspaso = x.tipo === 'traspaso';
+    const personal = x.tipo === 'personal';
+    const signo = x.tipo === 'ingreso' ? '+' : x.tipo === 'ahorro' ? (x.monto < 0 ? '↩' : '→') : traspaso ? '↔' : personal ? (x.monto > 0 ? '+' : '−') : '−';
+    const color = x.tipo === 'ingreso' ? 'c-ingreso' : x.tipo === 'ahorro' ? 'c-ahorro' : x.tipo === 'pago' ? 'c-deuda' : traspaso || personal ? '' : 'c-gasto';
+    const ic = x.tipo === 'ingreso' ? '💰' : x.tipo === 'ahorro' ? '🐷' : x.tipo === 'pago' ? '💳' : traspaso ? '🔁' : personal ? '🤝' : x.fijoId ? '📌' : '🛒';
+    const detalle = traspaso
+      ? `${esc(nombreMedio(x))} → ${esc(nombreMedio({ cuentaId: x.destinoId }))}`
+      : [esc(x.nota), esc(nombreMedio(x))].filter(Boolean).join(' · ');
+    const editable = (x.tipo === 'ingreso' || x.tipo === 'gasto') && !x.metaId && !x.deudaId && !x.msiId && !x.msiCompraId;
+    const tags = (x.tags || []).map(t => `<button class="tag" data-action="filtro-tag" data-v="${esc(t)}">#${esc(t)}</button>`).join('');
+    html += `<li>
+      <span style="font-size:1.3rem">${ic}</span>
+      <div class="info"><b>${esc(x.cat)}</b><span class="muted small">${detalle || '&nbsp;'}</span>${tags ? `<span class="tags">${tags}</span>` : ''}</div>
+      <span class="monto ${color}">${signo} ${fmt(Math.abs(x.monto))}</span>
+      ${editable ? `<button class="link-btn" data-action="editar-mov" data-id="${x.id}" aria-label="Editar">✏️</button>` : ''}
+      <button class="link-btn" data-action="borrar-mov" data-id="${x.id}" aria-label="Eliminar">🗑️</button>
+    </li>`;
+  }
+  return html + '</ul></div>';
+}
+const refrescarLista = () => { const l = $('#lista-movs'); if (l) l.innerHTML = htmlListaMovs(); };
+
 const VISTAS = {
   reportes: () => htmlReportes(),
   resumen() {
@@ -905,35 +955,20 @@ const VISTAS = {
   },
 
   movs() {
-    let lista = movsPer(per);
-    if (filtroMov !== 'todos') lista = lista.filter(x => x.tipo === filtroMov);
-    lista.sort((a, b) => b.fecha.localeCompare(a.fecha) || b.id.localeCompare(a.id));
     const chips = [['todos', 'Todos'], ['ingreso', 'Ingresos'], ['gasto', 'Gastos'], ['pago', 'Pagos'], ['ahorro', 'Ahorro']]
       .map(([k, n]) => `<button class="chip ${filtroMov === k ? 'on' : ''}" data-action="filtro" data-v="${k}">${n}</button>`).join('');
-    if (!lista.length) return `<div class="chips">${chips}</div><div class="card vacio"><div class="big">🧾</div><p>No hay movimientos en la ${nombrePeriodo(per)}.</p><button class="btn" data-action="nuevo-mov">Registrar el primero</button></div>`;
-
-    let html = `<div class="chips">${chips}</div><div class="card" style="padding-top:4px">`;
-    let dia = '';
-    for (const x of lista) {
-      if (x.fecha !== dia) { if (dia) html += '</ul>'; dia = x.fecha; html += `<p class="dia">${fechaCorta(dia)}</p><ul class="lista">`; }
-      const traspaso = x.tipo === 'traspaso';
-      const personal = x.tipo === 'personal';
-      const signo = x.tipo === 'ingreso' ? '+' : x.tipo === 'ahorro' ? (x.monto < 0 ? '↩' : '→') : traspaso ? '↔' : personal ? (x.monto > 0 ? '+' : '−') : '−';
-      const color = x.tipo === 'ingreso' ? 'c-ingreso' : x.tipo === 'ahorro' ? 'c-ahorro' : x.tipo === 'pago' ? 'c-deuda' : traspaso || personal ? '' : 'c-gasto';
-      const ic = x.tipo === 'ingreso' ? '💰' : x.tipo === 'ahorro' ? '🐷' : x.tipo === 'pago' ? '💳' : traspaso ? '🔁' : personal ? '🤝' : x.fijoId ? '📌' : '🛒';
-      const detalle = traspaso
-        ? `${esc(nombreMedio(x))} → ${esc(nombreMedio({ cuentaId: x.destinoId }))}`
-        : [esc(x.nota), esc(nombreMedio(x))].filter(Boolean).join(' · ');
-      const editable = (x.tipo === 'ingreso' || x.tipo === 'gasto') && !x.metaId && !x.deudaId && !x.msiId && !x.msiCompraId;
-      html += `<li>
-        <span style="font-size:1.3rem">${ic}</span>
-        <div class="info"><b>${esc(x.cat)}</b><span class="muted small">${detalle || '&nbsp;'}</span></div>
-        <span class="monto ${color}">${signo} ${fmt(Math.abs(x.monto))}</span>
-        ${editable ? `<button class="link-btn" data-action="editar-mov" data-id="${x.id}" aria-label="Editar">✏️</button>` : ''}
-        <button class="link-btn" data-action="borrar-mov" data-id="${x.id}" aria-label="Eliminar">🗑️</button>
-      </li>`;
-    }
-    return html + '</ul></div>';
+    const cats = [...new Set(S.movs.map(m => m.cat))].sort((a, b) => a.localeCompare(b, 'es'));
+    const tags = etiquetasUsadas();
+    return `
+      <div class="buscador">
+        <input type="search" id="buscar" placeholder="🔍 Buscar en todos tus movimientos…" value="${esc(busqueda)}" autocomplete="off">
+        <div class="grid2" style="margin-top:8px">
+          <select id="filtro-cat" aria-label="Categoría"><option value="">Todas las categorías</option>${cats.map(c => `<option ${c === filtroCat ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
+          <select id="filtro-tag" aria-label="Etiqueta"><option value="">Todas las etiquetas</option>${tags.map(t => `<option value="${esc(t)}" ${t === filtroTag ? 'selected' : ''}>#${esc(t)}</option>`).join('')}</select>
+        </div>
+      </div>
+      <div class="chips">${chips}</div>
+      <div id="lista-movs">${htmlListaMovs()}</div>`;
   },
 
   ahorro() {
@@ -1404,11 +1439,13 @@ function formMov(mov) {
       ${campo('Fecha', `name="fecha" type="date" required value="${m.fecha}"`)}
       ${campo('Nota (opcional)', `name="nota" maxlength="80" value="${esc(m.nota)}"`)}
     </div>
+    ${campo('Etiquetas (opcional)', `name="tags" maxlength="80" list="tags-usadas" value="${esc((m.tags || []).join(', '))}" placeholder="Ej. viaje, trabajo, bebé"`, 'Sepáralas con comas. Sirven para buscar y saber cuánto gastaste en algo.')}
+    <datalist id="tags-usadas">${etiquetasUsadas().map(t => `<option value="${esc(t)}">`).join('')}</datalist>
     <p class="hint">¿Ahorro, pago de tarjeta o traspaso entre cuentas? Regístralos desde Ahorro, Deudas o "Mis cuentas".</p>
   `, d => {
     const monto = num(d.monto);
     if (monto <= 0) return toast('Ingresa un monto válido'), false;
-    const datos = { tipo: d.tipo, monto, cat: d.cat, fecha: d.fecha, nota: d.nota.trim() };
+    const datos = { tipo: d.tipo, monto, cat: d.cat, fecha: d.fecha, nota: d.nota.trim(), tags: leerEtiquetas(d.tags) };
     let x = mov;
     if (x) Object.assign(x, datos); else { x = { id: uid(), ...datos }; S.movs.push(x); }
     aplicarMedio(x, d.medio);
@@ -1802,6 +1839,7 @@ const ACCIONES = {
   },
   traspaso: () => formTraspaso(),
   filtro: el => { filtroMov = el.dataset.v; render(); },
+  'filtro-tag': el => { filtroTag = el.dataset.v; vista = 'movs'; render(); window.scrollTo(0, 0); },
   'mes-prev': () => cambiarMes(-1),
   'mes-next': () => cambiarMes(1),
   'buscar-actualizacion': buscarActualizacion,
@@ -1926,7 +1964,12 @@ document.addEventListener('click', e => {
   const el = e.target.closest('[data-action]');
   if (el && ACCIONES[el.dataset.action] && el.type !== 'checkbox') { ACCIONES[el.dataset.action](el); }
 });
+document.addEventListener('input', e => {
+  if (e.target.id === 'buscar') { busqueda = e.target.value; refrescarLista(); }
+});
 document.addEventListener('change', e => {
+  if (e.target.id === 'filtro-cat') { filtroCat = e.target.value; refrescarLista(); }
+  if (e.target.id === 'filtro-tag') { filtroTag = e.target.value; refrescarLista(); }
   if (e.target.dataset.action === 'toggle-iva') ACCIONES['toggle-iva'](e.target);
   if (e.target.id === 'presupuesto') { S.ajustes.presupuestoDeuda = num(e.target.value); guardar(); render(); }
   if (e.target.id === 'archivo') {
