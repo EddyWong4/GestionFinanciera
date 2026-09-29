@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="es-MX">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f766e">
+  <meta name="description" content="Registra ingresos, gastos, ahorros y arma tu plan para liquidar tarjetas de crédito y departamentales.">
+  <title>Mis Finanzas</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1 id="titulo">Resumen</h1>
+    <div class="mes-nav">
+      <button class="icon-btn" data-action="mes-prev" aria-label="Periodo anterior">‹</button>
+      <button id="per-lbl" data-action="per-hoy" title="Ir al periodo actual"></button>
+      <button class="icon-btn" data-action="mes-next" aria-label="Periodo siguiente">›</button>
+    </div>
+  </header>
+
+  <main id="vista" tabindex="-1"></main>
+
+  <button class="fab" data-action="nuevo-mov" aria-label="Registrar movimiento">+</button>
+
+  <nav class="tabbar" aria-label="Secciones">
+    <button data-tab="resumen" class="activo"><span aria-hidden="true">📊</span>Resumen</button>
+    <button data-tab="movs"><span aria-hidden="true">🧾</span>Movimientos</button>
+    <button data-tab="ahorro"><span aria-hidden="true">🐷</span>Ahorro</button>
+    <button data-tab="deudas"><span aria-hidden="true">💳</span>Deudas</button>
+    <button data-tab="ajustes"><span aria-hidden="true">⚙️</span>Ajustes</button>
+  </nav>
+
+  <dialog id="dlg">
+    <form id="dlg-form" method="dialog">
+      <h2 id="dlg-title"></h2>
+      <div id="dlg-body"></div>
+      <div class="dlg-acciones">
+        <button type="button" class="btn sec" data-action="cerrar-dlg">Cancelar</button>
+        <button type="submit" class="btn" id="dlg-ok">Guardar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
