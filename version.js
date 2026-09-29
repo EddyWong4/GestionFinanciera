@@ -1,8 +1,13 @@
 // Versión de la app. Súbela en cada cambio publicado: la usan app.js (pantalla y avisos)
 // y sw.js (nombre de la caché, para que la app instalada descargue la versión nueva).
-const VERSION = '1.6.0';
+const VERSION = '1.7.0';
 
 const NOVEDADES = [
+  { v: '1.7.0', fecha: '2026-09-29', cambios: [
+    'Presupuesto por categoría: ponle un tope por quincena a cada categoría.',
+    'Barras en verde, amarillo (80%) y rojo (te pasaste), con lo que te queda.',
+    'Botón para sugerir el presupuesto según tus gastos de los últimos 3 meses.',
+  ] },
   { v: '1.6.0', fecha: '2026-09-29', cambios: [
     'Mis cuentas: efectivo, débito/nómina y ahorro, con su saldo real. Ajústalo con ✏️ para que coincida con tu banco.',
     'Cada gasto dice con qué se pagó: una cuenta o una tarjeta de crédito.',

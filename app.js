@@ -48,6 +48,7 @@ const estadoVacio = () => ({
   deudas: [],   // {id, nombre, tipo, saldoInicial, tasa, minimo, limite, diaCorte, diaPago, hist:[{id,fecha,tipo,monto}]}
   msi: [],      // compras a meses {id, nombre, tarjetaId?, monto, meses, tasa (0 = MSI), primerMes:'YYYY-MM', diaPago, inicial, pagos:[{id,fecha,mes,monto}]}
   fijos: [],    // {id, tipo:'gasto'|'ingreso', nombre, monto, cat, cuando:'cada'|'q1'|'q2'|'semanal', dia?, diaSemana?}
+  presupuestos: {}, // { categoría: tope por quincena }
   ajustes: { iva: true, estrategia: 'avalancha', presupuestoDeuda: 0, ultimoExport: null, modo: 'quincena', ultimoMedio: null, cuentasRevisadas: false },
 });
 
@@ -418,6 +419,13 @@ function consejos(t) {
     if (t.D / ing > 0.3) add('warn', '🛍️', `Los gastos de deseos son el ${pct(t.D / ing)} del ingreso (ideal ≤ 30%). Es el rubro más fácil de recortar.`);
     if (t.libre < 0) add('bad', '🚨', `Gastaste ${fmt(-t.libre)} más de lo que ingresó ${palabraPeriodo()}. Revisa si estás financiando el día a día con tarjeta.`);
   }
+  // Presupuesto: las categorías más comprometidas primero
+  const pres = estadoPresupuesto(t).filter(f => f.tope && f.uso >= 0.8);
+  for (const f of pres.slice(0, 3)) {
+    if (f.uso > 1) add('bad', '📊', `Te pasaste del presupuesto de <b>${esc(f.cat)}</b> por ${fmt(f.gastado - f.tope)} (${pct(f.uso)}). Compénsalo recortando otra categoría de "deseos".`);
+    else add('warn', '📊', `Ya usaste el ${pct(f.uso)} del presupuesto de <b>${esc(f.cat)}</b>: te quedan ${fmt(f.tope - f.gastado)} para ${palabraPeriodo()}.`);
+  }
+  if (!hayPresupuesto() && S.movs.filter(m => m.tipo === 'gasto').length >= 10) add('info', '📊', 'Ya tienes suficientes gastos registrados: pon un <b>presupuesto por categoría</b> (botón en "Gastos por categoría"). La app te lo puede sugerir con tu historial.');
   for (const c of S.cuentas) if (saldoCuenta(c) < -0.5) add('bad', '🏦', `Tu cuenta <b>${esc(c.nombre)}</b> está en ${fmt(saldoCuenta(c))}. Revisa si falta registrar un ingreso o ajusta su saldo real (✏️ en "Mis cuentas").`);
   if (t.gasto > 0 && t.conTarjeta / t.gasto > 0.5) add('warn', '💳', `Pagaste con tarjeta el ${pct(t.conTarjeta / t.gasto)} de tus gastos de ${palabraPeriodo()} (${fmt(t.conTarjeta)}). Asegúrate de apartar ese dinero para pagar la tarjeta completa y no generar intereses.`);
   const pend = pendientes(per);
@@ -474,6 +482,76 @@ function render() {
   $('.fab').style.display = vista === 'ajustes' ? 'none' : '';
   $$('.tabbar button').forEach(b => b.classList.toggle('activo', b.dataset.tab === vista));
   $('#vista').innerHTML = VISTAS[vista]();
+}
+
+/* ---------- Presupuesto por categoría ---------- */
+// Los topes se capturan por quincena; en vista mensual se duplican
+const topeCat = cat => (S.presupuestos[cat] || 0) * (esMes() ? 2 : 1);
+const hayPresupuesto = () => Object.values(S.presupuestos).some(v => v > 0);
+function estadoPresupuesto(t) {
+  const cats = new Set([...Object.keys(S.presupuestos).filter(c => S.presupuestos[c] > 0), ...Object.keys(t.porCat)]);
+  return [...cats].map(cat => {
+    const gastado = t.porCat[cat] || 0, tope = topeCat(cat);
+    return { cat, gastado, tope, uso: tope ? gastado / tope : null };
+  }).sort((a, b) => (b.uso ?? -1) - (a.uso ?? -1) || b.gastado - a.gastado);
+}
+// Sugerencia: promedio por quincena de los últimos 3 meses, redondeado a $50
+function sugerirPresupuesto() {
+  const desde = new Date(); desde.setMonth(desde.getMonth() - 3);
+  const lim = desde.toISOString().slice(0, 10), suma = {};
+  for (const m of S.movs) if (m.tipo === 'gasto' && m.fecha >= lim) suma[m.cat] = (suma[m.cat] || 0) + m.monto;
+  return Object.fromEntries(Object.entries(suma).map(([c, v]) => [c, Math.ceil(v / 6 / 50) * 50]));
+}
+function htmlPresupuesto(t) {
+  const filas = estadoPresupuesto(t);
+  const titulo = esMes() ? 'Presupuesto del mes' : 'Presupuesto de la quincena';
+  if (!hayPresupuesto()) {
+    const max = Math.max(1, ...filas.map(f => f.gastado));
+    return `<section class="card">
+      <div class="row"><h2 style="margin:0">📊 Gastos por categoría</h2><button class="btn mini" data-action="presupuesto">Poner presupuesto</button></div>
+      ${filas.length ? filas.map(f => `<div class="bar-row"><div class="row"><span>${esc(f.cat)}</span><b>${fmt(f.gastado)}</b></div>
+        <div class="bar"><span style="width:${f.gastado / max * 100}%;background:var(--gasto)"></span></div></div>`).join('') : '<p class="muted small">Sin gastos registrados en este periodo.</p>'}
+      <p class="small muted" style="margin-bottom:0">Ponle un tope a cada categoría por quincena y la app te avisa cuando vayas en 80% o te pases.</p>
+    </section>`;
+  }
+  const totTope = filas.reduce((a, f) => a + f.tope, 0);
+  const totGasto = filas.filter(f => f.tope).reduce((a, f) => a + f.gastado, 0);
+  const color = u => u == null ? 'var(--muted)' : u > 1 ? 'var(--deuda)' : u >= 0.8 ? 'var(--warn)' : 'var(--ingreso)';
+  return `<section class="card">
+    <div class="row"><h2 style="margin:0">📊 ${titulo}</h2><button class="btn mini sec" data-action="presupuesto">Editar</button></div>
+    ${filas.map(f => `<div class="bar-row">
+      <div class="row"><span>${esc(f.cat)}</span><span><b>${fmt(f.gastado)}</b>${f.tope ? ` <span class="meta">de ${fmt(f.tope)}</span>` : ' <span class="meta">sin tope</span>'}</span></div>
+      <div class="bar"><span style="width:${f.tope ? Math.min(100, f.uso * 100) : 100}%;background:${color(f.uso)};${f.tope ? '' : 'opacity:.35'}"></span></div>
+      ${f.tope ? `<div class="meta" style="color:${f.uso > 1 ? 'var(--deuda)' : 'inherit'}">${f.uso > 1 ? `Te pasaste por ${fmt(f.gastado - f.tope)}` : `Te quedan ${fmt(f.tope - f.gastado)}`}</div>` : ''}
+    </div>`).join('')}
+    <div class="resumen-fijos"><div class="row"><b>Total con presupuesto</b><b>${fmt(totGasto)} de ${fmt(totTope)}</b></div></div>
+  </section>`;
+}
+function formPresupuesto() {
+  const sug = sugerirPresupuesto();
+  const hayHist = Object.keys(sug).length > 0;
+  dialogo('Presupuesto por quincena', `
+    <p class="small muted" style="margin-top:-6px">Cuánto quieres gastar como máximo en cada categoría <b>por quincena</b>. Deja en blanco las que no quieras controlar.</p>
+    ${hayHist ? '<button type="button" class="btn mini sec" id="btn-sugerir" style="margin-bottom:10px">✨ Sugerir según mis gastos de los últimos 3 meses</button>' : ''}
+    <div class="grid2">${CATS_GASTO.map((c, i) => campo(esc(c), `name="p${i}" type="number" inputmode="decimal" min="0" step="50" value="${S.presupuestos[c] || ''}" placeholder="—"`)).join('')}</div>
+    <p class="hint" id="pres-total"></p>
+  `, d => {
+    S.presupuestos = {};
+    CATS_GASTO.forEach((c, i) => { const v = num(d['p' + i]); if (v > 0) S.presupuestos[c] = v; });
+    toast('📊 Presupuesto guardado');
+  });
+  const body = $('#dlg-body');
+  const total = () => {
+    const tot = CATS_GASTO.reduce((a, _, i) => a + num(body.querySelector(`[name=p${i}]`).value), 0);
+    const ingQ = promedioIngresoMensual() / 2;
+    $('#pres-total').innerHTML = `Total por quincena: <b>${fmt(tot)}</b>${ingQ ? ` · tu ingreso promedio por quincena: ${fmt(ingQ)} (${pct(tot / ingQ)})` : ''}`;
+  };
+  body.oninput = total;
+  $('#btn-sugerir')?.addEventListener('click', () => {
+    CATS_GASTO.forEach((c, i) => { if (sug[c]) body.querySelector(`[name=p${i}]`).value = sug[c]; });
+    total();
+  });
+  total();
 }
 
 function htmlCuentas() {
@@ -550,8 +628,6 @@ const VISTAS = {
     const proyectado = t.libre + pend.ingreso - pend.gasto - pend.tarjetas;
     const ing = t.ingreso || 1;
     const totalDeuda = deudasActivas().reduce((a, d) => a + saldoDeuda(d), 0) + msiActivas().reduce((a, c) => a + saldoMSI(c), 0);
-    const cats = Object.entries(t.porCat).sort((a, b) => b[1] - a[1]);
-    const maxCat = cats[0]?.[1] || 1;
 
     // Tendencia de los últimos 6 periodos
     const ult = Array.from({ length: 6 }, (_, i) => moverPeriodo(per, i - 5));
@@ -575,6 +651,8 @@ const VISTAS = {
       ${htmlCuentas()}
 
       ${htmlCompromisos(pend, proyectado)}
+
+      ${htmlPresupuesto(t)}
 
       <section class="card">
         <h2>🧑‍💼 Tu asesor dice</h2>
@@ -607,13 +685,6 @@ const VISTAS = {
         <div class="leyenda"><span><i style="background:var(--ingreso)"></i>Ingresos</span><span><i style="background:var(--gasto)"></i>Salidas de tus cuentas</span></div>
       </section>
 
-      <section class="card">
-        <h2>Gastos por categoría</h2>
-        ${cats.length ? cats.map(([c, v]) => `<div class="bar-row">
-            <div class="row"><span>${esc(c)}</span><b>${fmt(v)}</b></div>
-            <div class="bar"><span style="width:${v / maxCat * 100}%;background:var(--gasto)"></span></div>
-          </div>`).join('') : '<p class="muted">Sin gastos registrados en este periodo.</p>'}
-      </section>
 
       <p class="small muted" style="text-align:center;margin:4px 0 0" data-tab="ajustes">Mis Finanzas v${VERSION}</p>
       ${totalDeuda > 0 ? `<section class="card row" data-tab="deudas" style="cursor:pointer">
@@ -1277,6 +1348,7 @@ async function exportar() {
 function validarDatos(d) {
   if (d && !Array.isArray(d.fijos)) d.fijos = [];
   if (d && !Array.isArray(d.msi)) d.msi = [];
+  if (d && (typeof d.presupuestos !== 'object' || !d.presupuestos)) d.presupuestos = {};
   return d && Array.isArray(d.movs) && Array.isArray(d.metas) && Array.isArray(d.deudas) && typeof d.ajustes === 'object';
 }
 async function aplicarDatos(d, msg) {
@@ -1297,6 +1369,7 @@ const ACCIONES = {
     const extra = m.histId || m.pagoId ? 'También se quitará el pago del historial de la deuda.' : m.tarjetaId ? 'También se quitará el cargo de la tarjeta.' : '';
     confirmar('Eliminar movimiento', `¿Eliminar <b>${esc(m.cat)}</b> por ${fmt(Math.abs(m.monto))}?${extra ? `<br><span class="small muted">${extra}</span>` : ''}`, () => quitarMov(m));
   },
+  presupuesto: () => formPresupuesto(),
   'nueva-cuenta': () => formCuenta(),
   'editar-cuenta': el => formCuenta(buscarId(S.cuentas, el.dataset.id)),
   'borrar-cuenta': el => {
