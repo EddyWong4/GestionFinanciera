@@ -1,5 +1,5 @@
 // Service worker: guarda la app en caché para que funcione sin internet
-const CACHE = 'mis-finanzas-v2';
+const CACHE = 'mis-finanzas-v3';
 const ARCHIVOS = [
   './',
   './index.html',

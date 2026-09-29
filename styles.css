@@ -246,3 +246,4 @@ table.plan td.n, table.plan th.n { text-align: right; font-variant-numeric: tabu
 .lista li.hecho .monto { opacity: .55; }
 .resumen-fijos { border-top: 2px dashed var(--line); margin-top: 6px; padding-top: 10px; display: grid; gap: 4px; }
 @media (max-width: 380px) { #per-lbl { min-width: 0; font-size: .78rem; padding: 6px 6px; } }
+.badge.sem { background: var(--accent-soft); color: var(--accent); margin-left: 4px; vertical-align: 1px; }
