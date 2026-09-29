@@ -537,6 +537,7 @@ function render() {
   $('.fab').style.display = vista === 'ajustes' || vista === 'reportes' ? 'none' : '';
   $$('.tabbar button').forEach(b => b.classList.toggle('activo', b.dataset.tab === vista));
   $('#vista').innerHTML = VISTAS[vista]();
+  actualizarGlobo();
 }
 
 /* ---------- Presupuesto por categoría ---------- */
@@ -761,6 +762,59 @@ function formPagarPrevision(m) {
   }, 'Registrar pago');
 }
 
+/* ---------- Próximos pagos (recordatorios dentro de la app) ---------- */
+const isoLocal = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+function fechaDelMes(ym, dia) { return `${ym}-${String(Math.min(dia, diasDelMes(ym))).padStart(2, '0')}`; }
+function proximosPagos(dias = 7) {
+  const hoy = hoyISO(), lim = isoLocal(new Date(Date.now() + dias * 864e5));
+  const ymHoy = hoy.slice(0, 7), ymSig = sumarMeses(ymHoy, 1);
+  const out = [];
+  const add = (fecha, nombre, monto, extra = {}) => { if (fecha >= hoy && fecha <= lim) out.push({ fecha, nombre, monto, ...extra }); };
+  // Tarjetas y préstamos: pagado si hay un pago en los 25 días previos al vencimiento
+  for (const d of deudasActivas().filter(d => d.diaPago)) for (const ym of [ymHoy, ymSig]) {
+    const f = fechaDelMes(ym, d.diaPago), desde = isoLocal(new Date(new Date(f + 'T12:00') - 25 * 864e5));
+    if (!d.hist.some(h => h.tipo === 'pago' && h.fecha >= desde && h.fecha <= f)) add(f, `💳 ${d.nombre}`, Math.min(d.minimo, saldoDeuda(d)), { accion: 'pagar-deuda', id: d.id });
+  }
+  // Mensualidades a meses
+  for (const c of msiActivas()) for (const ym of [ymHoy, ymSig]) {
+    const k = mesesEntre(c.primerMes, ym);
+    if (k >= 0 && k < c.meses && !msiPagadaEn(c, ym)) add(fechaDelMes(ym, c.diaPago || 1), `🛍️ ${c.nombre} (${k + 1}/${c.meses})`, mensualidad(c), { accion: 'marcar-msi', id: c.id, mes: ym, q: `${ym}-${(c.diaPago || 1) <= 15 ? 1 : 2}` });
+  }
+  // Gastos fijos con fecha (mensuales y semanales) que aún no marcas
+  for (const q of [qActual(), moverPeriodo(qActual(), 1)]) for (const { f, fecha, mov } of compromisos(q)[0].fijos) {
+    if (mov || f.tipo !== 'gasto') continue;
+    const cuando = fecha || (f.cuando === 'mensual' || f.cuando === 'q1' || f.cuando === 'q2' ? fechaDelMes(q.slice(0, 7), diaMensual(f)) : null);
+    if (cuando) add(cuando, `📌 ${f.nombre}`, f.monto);
+  }
+  // Gastos del año que se pagan en estos días y no están cubiertos
+  for (const m of previsiones()) if (faltaPrevision(m) > 0) add(`${m.fechaMeta}-01`, `📅 ${m.nombre}`, m.objetivo, { falta: faltaPrevision(m) });
+  return out.sort((a, b) => a.fecha.localeCompare(b.fecha));
+}
+function htmlProximosPagos() {
+  const lista = proximosPagos();
+  if (!lista.length) return '';
+  const hoy = new Date(hoyISO() + 'T12:00');
+  const cuando = f => { const n = Math.round((new Date(f + 'T12:00') - hoy) / 864e5); return n === 0 ? 'Hoy' : n === 1 ? 'Mañana' : `En ${n} días`; };
+  const total = lista.reduce((a, x) => a + x.monto, 0);
+  return `<section class="card">
+    <h2>⏰ Próximos pagos <span class="muted small">(7 días)</span></h2>
+    <ul class="lista">${lista.map(x => {
+      const n = Math.round((new Date(x.fecha + 'T12:00') - hoy) / 864e5);
+      return `<li><div class="info"><b>${esc(x.nombre)}</b><span class="small" style="color:${n <= 2 ? 'var(--deuda)' : 'var(--muted)'}">${cuando(x.fecha)} · ${fechaCorta(x.fecha).slice(0, -5)}${x.falta ? ` · te faltan ${fmt(x.falta)}` : ''}</span></div>
+        <span class="monto">${fmt(x.monto)}</span>
+        ${x.accion ? `<button class="btn mini" data-action="${x.accion}" data-id="${x.id}" ${x.mes ? `data-mes="${x.mes}" data-q="${x.q}"` : ''}>Pagar</button>` : ''}</li>`;
+    }).join('')}</ul>
+    <div class="resumen-fijos"><div class="row"><b>Total próximos 7 días</b><b>${fmt(total)}</b></div></div>
+  </section>`;
+}
+// Globo con el número de pagos próximos en el ícono de la app (si el teléfono lo permite)
+function actualizarGlobo() {
+  try {
+    const n = proximosPagos(3).length;
+    if (n) navigator.setAppBadge?.(n)?.catch?.(() => {}); else navigator.clearAppBadge?.()?.catch?.(() => {});
+  } catch { /* sin soporte */ }
+}
+
 function htmlCuentas() {
   const total = totalCuentas();
   return `<section class="card">
@@ -905,6 +959,8 @@ const VISTAS = {
         <div class="kpi"><div class="lbl">Ahorro y pagos</div><div class="val c-ahorro">${fmt(t.ahorro + t.pagos)}</div>${t.pagos ? `<div class="sub">${fmt(t.pagos)} a deudas</div>` : ''}</div>
         <div class="kpi"><div class="lbl">Dinero libre</div><div class="val" style="color:${t.libre < 0 ? 'var(--deuda)' : 'inherit'}">${fmt(t.libre)}</div><div class="sub">entró − salió de tus cuentas</div></div>
       </div>
+
+      ${htmlProximosPagos()}
 
       ${htmlCuentas()}
 
@@ -1909,7 +1965,11 @@ const ACCIONES = {
   'marcar-msi': el => {
     const c = buscarId(S.msi, el.dataset.id), ym = el.dataset.mes;
     if (c.pagos.some(p => p.mes === ym)) { quitarPagoMSI(c, ym); toast('Desmarcado'); }
-    else { pagarMSI(c, ym, fechaFijo({ dia: c.diaPago }, rango(el.dataset.q))); toast(`✅ ${c.nombre}: mensualidad pagada`); }
+    else {
+      const f = fechaFijo({ dia: c.diaPago }, rango(el.dataset.q));
+      pagarMSI(c, ym, f > hoyISO() ? hoyISO() : f); // si pagas por adelantado, la fecha es hoy
+      toast(`✅ ${c.nombre}: mensualidad pagada`);
+    }
     guardar(); render();
   },
   'borrar-msi': el => {

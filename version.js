@@ -1,8 +1,12 @@
 // Versión de la app. Súbela en cada cambio publicado: la usan app.js (pantalla y avisos)
 // y sw.js (nombre de la caché, para que la app instalada descargue la versión nueva).
-const VERSION = '1.13.0';
+const VERSION = '1.14.0';
 
 const NOVEDADES = [
+  { v: '1.14.0', fecha: '2026-09-29', cambios: [
+    'Resumen → Próximos pagos: tarjetas, mensualidades, fijos y gastos del año que vencen en los próximos 7 días, con botón para pagar.',
+    'Si tu teléfono lo permite, el ícono de la app muestra cuántos pagos vencen en los próximos 3 días.',
+  ] },
   { v: '1.13.0', fecha: '2026-09-29', cambios: [
     'Movimientos: buscador en todas tus fechas (por categoría, nota, cuenta, monto o etiqueta).',
     'Filtros por categoría y por etiqueta, con el total de lo filtrado.',
