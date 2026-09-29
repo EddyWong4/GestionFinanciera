@@ -125,6 +125,11 @@ const DB = {
   respaldos() { return this.tx('respaldos', 'readonly', s => s.getAll()); },
   guardarRespaldo(r) { return this.tx('respaldos', 'readwrite', s => s.put(r)); },
   borrarRespaldo(id) { return this.tx('respaldos', 'readwrite', s => s.delete(id)); },
+  borrarRespaldos() { return this.tx('respaldos', 'readwrite', s => s.clear()); },
+  // Claves sueltas (ej. el PIN): fuera del estado para que no viajen en los respaldos
+  leerClave(k) { return this.tx('estado', 'readonly', s => s.get(k)); },
+  escribirClave(k, v) { return this.tx('estado', 'readwrite', s => s.put(v, k)); },
+  borrarClave(k) { return this.tx('estado', 'readwrite', s => s.delete(k)); },
 };
 
 const MAX_RESPALDOS = 14;
@@ -1014,6 +1019,19 @@ const VISTAS = {
   ajustes() {
     return `
       <section class="card">
+        <h2>🔒 Seguridad</h2>
+        ${PIN ? `<p class="small" style="margin-top:-4px">✅ La app pide tu PIN al abrirse y cuando la dejas más de 1 minuto.${PIN.bio ? ' También puedes entrar con huella / rostro.' : ''}</p>`
+          : '<p class="small muted" style="margin-top:-4px">Pon un PIN para que nadie más vea tus finanzas si toma tu teléfono.</p>'}
+        <div class="acciones">
+          ${PIN ? `<button class="btn mini" data-action="cambiar-pin">Cambiar PIN</button>
+            ${bioDisponible ? `<button class="btn mini sec" data-action="huella">${PIN.bio ? 'Quitar huella / rostro' : '👆 Activar huella / rostro'}</button>` : ''}
+            <button class="btn mini sec" data-action="quitar-pin">Quitar PIN</button>`
+          : '<button class="btn" data-action="poner-pin">Poner PIN</button>'}
+        </div>
+        <p class="hint">El PIN protege la pantalla de la app. Para más seguridad, usa también el bloqueo de tu teléfono y exporta tus respaldos con contraseña.</p>
+      </section>
+
+      <section class="card">
         <h2>🗓️ Organizar por</h2>
         <div class="chips" style="margin-bottom:4px">
           <button class="chip ${esMes() ? '' : 'on'}" data-action="modo" data-v="quincena">Quincena</button>
@@ -1714,10 +1732,12 @@ async function puntoRestauracion(nota) {
   for (const r of man.slice(10)) await DB.borrarRespaldo(r.id);
 }
 
-async function exportar() {
-  const nombre = `mis-finanzas-respaldo-${hoyISO()}.json`;
+async function exportar(pass) {
+  const nombre = `mis-finanzas-respaldo-${hoyISO()}${pass ? '-protegido' : ''}.json`;
   S.ajustes.ultimoExport = new Date().toISOString();
-  const blob = new Blob([JSON.stringify({ app: 'mis-finanzas', exportado: S.ajustes.ultimoExport, datos: S }, null, 1)], { type: 'application/json' });
+  const contenido = JSON.stringify({ app: 'mis-finanzas', exportado: S.ajustes.ultimoExport, datos: S }, null, 1);
+  const final = pass ? JSON.stringify({ app: 'mis-finanzas', cifrado: true, exportado: S.ajustes.ultimoExport, ...(await cifrar(contenido, pass)) }) : contenido;
+  const blob = new Blob([final], { type: 'application/json' });
   try {
     // Donde se soporte, permite elegir la carpeta del dispositivo
     if (window.showSaveFilePicker) {
@@ -1874,7 +1894,15 @@ const ACCIONES = {
     });
   },
   estrategia: el => { S.ajustes.estrategia = el.dataset.v; guardar(); render(); },
-  exportar,
+  exportar: () => formExportar(),
+  'poner-pin': () => formPIN(false),
+  'cambiar-pin': () => formPIN(true),
+  'quitar-pin': () => formQuitarPIN(),
+  huella: async () => {
+    if (PIN.bio) { delete PIN.bio; await DB.escribirClave('pin', PIN); render(); pintarRespaldos(); return toast('Huella / rostro desactivado'); }
+    try { await registrarHuella(); render(); pintarRespaldos(); toast('👆 Huella / rostro activado'); }
+    catch { toast('No se pudo activar. Revisa que tu teléfono tenga huella o rostro configurado.'); }
+  },
   importar: () => $('#archivo').click(),
   'respaldo-manual': async () => { await puntoRestauracion('Manual'); pintarRespaldos(); toast('📌 Punto de restauración creado'); },
   restaurar: async el => {
@@ -1906,11 +1934,7 @@ document.addEventListener('change', e => {
     if (!f) return;
     f.text().then(txt => {
       const j = JSON.parse(txt);
-      const d = j.datos || j;
-      if (!validarDatos(d)) throw new Error('formato');
-      confirmar('Restaurar desde archivo', `El archivo contiene ${d.movs.length} movimientos, ${d.metas.length} metas y ${d.deudas.length} deudas. Reemplazará tus datos actuales (se guardará un punto de restauración antes).`, () => {
-        setTimeout(() => aplicarDatos(d, '✅ Respaldo importado'));
-      }, 'Restaurar');
+      if (j.cifrado) pedirClaveRespaldo(j); else procesarRespaldo(j);
     }).catch(() => toast('⚠️ El archivo no es un respaldo válido'));
   }
 });
@@ -1921,6 +1945,156 @@ let toastT;
 function toast(msg) {
   const t = $('#toast'); t.textContent = msg; t.classList.add('show');
   clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), 2600);
+}
+
+/* ---------- Seguridad: PIN, huella y respaldos cifrados ---------- */
+// Nota: el PIN bloquea la pantalla; los datos en el dispositivo no se cifran (seguirían legibles con acceso técnico).
+let PIN = null;            // { salt, hash, bio? } — solo se guarda el hash del PIN
+let bioDisponible = false; // el teléfono tiene huella / rostro
+let ocultaDesde = null;
+const b64 = buf => { const u = new Uint8Array(buf); let s = ''; for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(s); };
+const deb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+async function derivar(secreto, salt, uso) {
+  const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(secreto), 'PBKDF2', false, ['deriveBits', 'deriveKey']);
+  const algo = { name: 'PBKDF2', salt, iterations: 150000, hash: 'SHA-256' };
+  if (uso === 'bits') return b64(await crypto.subtle.deriveBits(algo, base, 256));
+  return crypto.subtle.deriveKey(algo, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+const pinCorrecto = async v => !!PIN && await derivar(v, deb64(PIN.salt), 'bits') === PIN.hash;
+async function guardarPIN(v) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  PIN = { ...(PIN || {}), salt: b64(salt), hash: await derivar(v, salt, 'bits') };
+  await DB.escribirClave('pin', PIN);
+}
+
+async function cifrar(texto, pass) {
+  const salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await derivar(pass, salt, 'key'), new TextEncoder().encode(texto));
+  return { salt: b64(salt), iv: b64(iv), datos: b64(ct) };
+}
+async function descifrar(o, pass) {
+  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: deb64(o.iv) }, await derivar(pass, deb64(o.salt), 'key'), deb64(o.datos));
+  return new TextDecoder().decode(pt);
+}
+
+// Huella / rostro con el autenticador del teléfono (WebAuthn, sin servidor: solo desbloquea la pantalla)
+async function registrarHuella() {
+  const cred = await navigator.credentials.create({ publicKey: {
+    challenge: crypto.getRandomValues(new Uint8Array(32)), rp: { name: 'Mis Finanzas' },
+    user: { id: crypto.getRandomValues(new Uint8Array(16)), name: 'mis-finanzas', displayName: 'Mis Finanzas' },
+    pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
+    authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'required', residentKey: 'discouraged' }, timeout: 60000,
+  } });
+  PIN.bio = b64(cred.rawId);
+  await DB.escribirClave('pin', PIN);
+}
+async function verificarHuella() {
+  try {
+    await navigator.credentials.get({ publicKey: { challenge: crypto.getRandomValues(new Uint8Array(32)), allowCredentials: [{ type: 'public-key', id: deb64(PIN.bio) }], userVerification: 'required', timeout: 60000 } });
+    return true;
+  } catch { return false; }
+}
+
+function mostrarBloqueo() {
+  return new Promise(resolve => {
+    if ($('#bloqueo')) return;
+    if ($('#dlg').open) $('#dlg').close();
+    document.body.classList.add('bloqueada');
+    const el = document.createElement('div');
+    el.id = 'bloqueo';
+    el.innerHTML = `<form class="caja" autocomplete="off">
+      <div style="font-size:2.6rem">🔒</div><h2 style="margin:6px 0 2px">Mis Finanzas</h2><p class="muted small">Escribe tu PIN</p>
+      <input type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" id="pin-in" aria-label="PIN" autocomplete="off">
+      <p id="pin-err" class="small" style="color:var(--deuda);min-height:1.3em"></p>
+      <button class="btn" type="submit" style="width:100%">Entrar</button>
+      ${PIN.bio ? '<button class="btn sec" type="button" id="pin-bio" style="width:100%;margin-top:8px">👆 Usar huella / rostro</button>' : ''}
+      <button class="link-btn small" type="button" id="pin-olvide" style="margin-top:16px">Olvidé mi PIN</button>
+    </form>`;
+    document.body.append(el);
+    const inp = el.querySelector('#pin-in'), err = el.querySelector('#pin-err');
+    let fallos = 0, esperaHasta = 0;
+    const abrir = () => { el.remove(); document.body.classList.remove('bloqueada'); resolve(); };
+    el.querySelector('form').onsubmit = async e => {
+      e.preventDefault();
+      if (Date.now() < esperaHasta) { err.textContent = `Espera ${Math.ceil((esperaHasta - Date.now()) / 1000)} s`; return; }
+      if (await pinCorrecto(inp.value)) return abrir();
+      inp.value = '';
+      if (++fallos >= 5) { fallos = 0; esperaHasta = Date.now() + 30000; err.textContent = 'Demasiados intentos. Espera 30 segundos.'; }
+      else err.textContent = 'PIN incorrecto';
+    };
+    el.querySelector('#pin-bio')?.addEventListener('click', async () => { if (await verificarHuella()) abrir(); else err.textContent = 'No se pudo verificar. Usa tu PIN.'; });
+    el.querySelector('#pin-olvide').onclick = async () => {
+      if (!confirm('Sin el PIN no hay forma de ver tus datos.\n\n¿Borrar TODOS los datos de la app (incluidos los respaldos internos) para empezar de nuevo? Después podrás importar tu archivo de respaldo si tienes uno.')) return;
+      if (!confirm('¿Seguro? Esto no se puede deshacer.')) return;
+      S = migrar(estadoVacio());
+      await DB.escribir(S); await DB.borrarRespaldos(); await DB.borrarClave('pin');
+      PIN = null; abrir(); render(); toast('Datos borrados. Puedes restaurar tu archivo en Ajustes.');
+    };
+    setTimeout(() => inp.focus(), 50);
+  });
+}
+// Oculta la app al salir y pide PIN si pasó más de 1 minuto
+document.addEventListener('visibilitychange', () => {
+  if (!PIN) return;
+  if (document.hidden) { ocultaDesde = Date.now(); document.body.classList.add('bloqueada'); }
+  else if (ocultaDesde && Date.now() - ocultaDesde > 60000) mostrarBloqueo();
+  else if (!$('#bloqueo')) document.body.classList.remove('bloqueada');
+});
+
+function formPIN(cambiar) {
+  dialogo(cambiar ? 'Cambiar PIN' : 'Poner PIN', `
+    ${cambiar ? campo('PIN actual', 'name="actual" type="password" inputmode="numeric" maxlength="8" required autocomplete="off"') : ''}
+    <div class="grid2">
+      ${campo('Nuevo PIN', 'name="pin" type="password" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" required autocomplete="off"', '4 a 8 números')}
+      ${campo('Repítelo', 'name="pin2" type="password" inputmode="numeric" maxlength="8" required autocomplete="off"')}
+    </div>
+    <p class="hint">Si olvidas el PIN, la única salida es borrar los datos de la app. Exporta un archivo de respaldo por si acaso.</p>
+  `, d => {
+    if (!/^\d{4,8}$/.test(d.pin)) return toast('El PIN debe tener de 4 a 8 números'), false;
+    if (d.pin !== d.pin2) return toast('Los PIN no coinciden'), false;
+    (async () => {
+      if (cambiar && !(await pinCorrecto(d.actual))) return toast('PIN actual incorrecto');
+      await guardarPIN(d.pin); render(); pintarRespaldos();
+      toast(cambiar ? '🔒 PIN cambiado' : '🔒 PIN activado');
+    })();
+  });
+}
+function formQuitarPIN() {
+  dialogo('Quitar PIN', campo('PIN actual', 'name="actual" type="password" inputmode="numeric" maxlength="8" required autocomplete="off"'), d => {
+    (async () => {
+      if (!(await pinCorrecto(d.actual))) return toast('PIN incorrecto');
+      await DB.borrarClave('pin'); PIN = null; render(); pintarRespaldos(); toast('PIN quitado');
+    })();
+  }, 'Quitar');
+}
+
+// Exportar con contraseña opcional
+function formExportar() {
+  dialogo('Exportar archivo de respaldo', `
+    <p class="small muted" style="margin-top:-6px">Se guarda un archivo en tu dispositivo con todos tus datos.</p>
+    <div class="grid2">
+      ${campo('Contraseña (opcional)', 'name="pass" type="password" autocomplete="new-password"')}
+      ${campo('Repítela', 'name="pass2" type="password" autocomplete="new-password"')}
+    </div>
+    <p class="hint">Con contraseña, el archivo va cifrado y nadie puede leerlo sin ella. Si la olvidas, no hay forma de recuperarlo.</p>
+  `, d => {
+    if (d.pass !== d.pass2) return toast('Las contraseñas no coinciden'), false;
+    setTimeout(() => exportar(d.pass));
+  }, 'Exportar');
+}
+function procesarRespaldo(j) {
+  const d = j.datos || j;
+  if (!validarDatos(d)) return toast('⚠️ El archivo no es un respaldo válido');
+  confirmar('Restaurar desde archivo', `El archivo contiene ${d.movs.length} movimientos, ${d.metas.length} metas y ${d.deudas.length} deudas. Reemplazará tus datos actuales (se guardará un punto de restauración antes).`, () => {
+    setTimeout(() => aplicarDatos(d, '✅ Respaldo importado'));
+  }, 'Restaurar');
+}
+function pedirClaveRespaldo(j) {
+  dialogo('Respaldo protegido', campo('Contraseña del respaldo', 'name="pass" type="password" required autocomplete="off"'), d => {
+    descifrar(j, d.pass)
+      .then(t => setTimeout(() => procesarRespaldo(JSON.parse(t)), 50))
+      .catch(() => toast('⚠️ Contraseña incorrecta'));
+  }, 'Abrir');
 }
 
 /* ---------- PWA ---------- */
@@ -1940,6 +2114,9 @@ async function iniciar() {
   }
   // Pide al navegador que no borre los datos por falta de espacio
   if (navigator.storage?.persist) navigator.storage.persist().catch(() => {});
+  try { PIN = (await DB.leerClave('pin')) || null; } catch { PIN = null; }
+  try { bioDisponible = !!(window.PublicKeyCredential && await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()); } catch { bioDisponible = false; }
+  if (PIN) await mostrarBloqueo(); // nada de tus datos se muestra antes de desbloquear
   render();
   avisarSiSeActualizo();
   registrarSW();

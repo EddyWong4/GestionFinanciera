@@ -1,8 +1,13 @@
 // Versión de la app. Súbela en cada cambio publicado: la usan app.js (pantalla y avisos)
 // y sw.js (nombre de la caché, para que la app instalada descargue la versión nueva).
-const VERSION = '1.11.0';
+const VERSION = '1.12.0';
 
 const NOVEDADES = [
+  { v: '1.12.0', fecha: '2026-09-29', cambios: [
+    'Ajustes → Seguridad: pon un PIN para abrir la app (y huella o rostro si tu teléfono lo tiene).',
+    'La app se oculta al salir y pide el PIN si pasó más de 1 minuto.',
+    'Respaldos con contraseña: el archivo va cifrado y solo se abre con ella.',
+  ] },
   { v: '1.11.0', fecha: '2026-09-29', cambios: [
     'Nueva pestaña Reportes: patrimonio neto (lo que tienes menos lo que debes) y su evolución mes a mes.',
     'Comparativo de este mes contra el anterior, general y por categoría.',

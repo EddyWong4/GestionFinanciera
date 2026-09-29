@@ -263,6 +263,13 @@ table.proy tr.det td { font-size: .72rem; color: var(--muted); padding-top: 2px;
   box-shadow: 0 6px 16px rgba(0,0,0,.3); font-size: .9rem; max-width: 520px; margin: 0 auto;
 }
 
+/* Bloqueo con PIN */
+body.bloqueada main, body.bloqueada .fab, body.bloqueada .tabbar, body.bloqueada .mes-nav, body.bloqueada #banner-act { visibility: hidden; }
+#bloqueo { position: fixed; inset: 0; z-index: 50; background: var(--bg); display: grid; place-items: center; padding: 24px; }
+#bloqueo .caja { width: min(320px, 100%); text-align: center; }
+#bloqueo input { width: 100%; font-size: 1.6rem; letter-spacing: .5em; text-align: center; padding: 12px; border-radius: 12px;
+  border: 1px solid var(--line); background: var(--card); color: var(--text); margin-top: 8px; }
+
 .patrimonio { font-size: 2rem; font-weight: 800; font-variant-numeric: tabular-nums; margin: 2px 0 4px; }
 .comparativo > div { min-width: 0; }
 .comparativo .lin { margin-top: 4px; font-size: .76rem; color: var(--muted); }
