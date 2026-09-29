@@ -1,8 +1,12 @@
 // Versión de la app. Súbela en cada cambio publicado: la usan app.js (pantalla y avisos)
 // y sw.js (nombre de la caché, para que la app instalada descargue la versión nueva).
-const VERSION = '1.7.0';
+const VERSION = '1.8.0';
 
 const NOVEDADES = [
+  { v: '1.8.0', fecha: '2026-09-29', cambios: [
+    'Próximas quincenas: proyección de las siguientes 6 quincenas con lo que entra, lo que sale y cuánto te quedará.',
+    'Aviso anticipado cuando una quincena futura se ve apretada.',
+  ] },
   { v: '1.7.0', fecha: '2026-09-29', cambios: [
     'Presupuesto por categoría: ponle un tope por quincena a cada categoría.',
     'Barras en verde, amarillo (80%) y rojo (te pasaste), con lo que te queda.',

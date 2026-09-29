@@ -426,6 +426,8 @@ function consejos(t) {
     else add('warn', '📊', `Ya usaste el ${pct(f.uso)} del presupuesto de <b>${esc(f.cat)}</b>: te quedan ${fmt(f.tope - f.gastado)} para ${palabraPeriodo()}.`);
   }
   if (!hayPresupuesto() && S.movs.filter(m => m.tipo === 'gasto').length >= 10) add('info', '📊', 'Ya tienes suficientes gastos registrados: pon un <b>presupuesto por categoría</b> (botón en "Gastos por categoría"). La app te lo puede sugerir con tu historial.');
+  const apretada = S.fijos.some(f => f.tipo === 'ingreso') && proyeccion().slice(1).find(f => f.saldo < 0);
+  if (apretada) add('bad', '🔮', `Según tu proyección, en la <b>${nombrePeriodo(apretada.q)}</b> te faltarían ${fmt(-apretada.saldo)}. Revisa "Próximas quincenas" y prepárate con tiempo.`);
   for (const c of S.cuentas) if (saldoCuenta(c) < -0.5) add('bad', '🏦', `Tu cuenta <b>${esc(c.nombre)}</b> está en ${fmt(saldoCuenta(c))}. Revisa si falta registrar un ingreso o ajusta su saldo real (✏️ en "Mis cuentas").`);
   if (t.gasto > 0 && t.conTarjeta / t.gasto > 0.5) add('warn', '💳', `Pagaste con tarjeta el ${pct(t.conTarjeta / t.gasto)} de tus gastos de ${palabraPeriodo()} (${fmt(t.conTarjeta)}). Asegúrate de apartar ese dinero para pagar la tarjeta completa y no generar intereses.`);
   const pend = pendientes(per);
@@ -554,6 +556,64 @@ function formPresupuesto() {
   total();
 }
 
+/* ---------- Proyección de las próximas quincenas ---------- */
+// Flujo esperado de una quincena: lo que falta por entrar y salir de tus cuentas
+function flujoQuincena(q, esActual) {
+  const b = compromisos(q)[0];
+  let entra = 0, fijos = 0, deudas = 0;
+  const fijosPorCat = {};
+  for (const { f, mov } of b.fijos) {
+    if (mov) continue; // ya registrado: ya está en el saldo de tus cuentas
+    if (f.tipo === 'ingreso') { entra += f.monto; continue; }
+    fijosPorCat[f.cat] = (fijosPorCat[f.cat] || 0) + f.monto;
+    if (!(f.medio || '').startsWith('t:')) fijos += f.monto; // con tarjeta: se paga después, con la tarjeta
+  }
+  for (const { d, pagado } of b.tarjetas) if (!pagado) deudas += Math.min(d.minimo, saldoDeuda(d));
+  for (const { c, pagado } of b.meses) if (!pagado) deudas += mensualidad(c);
+  // Gasto del día a día: lo que queda del presupuesto, o tu promedio si no tienes presupuesto
+  const t = esActual ? totales(q) : null;
+  let variable = 0;
+  if (hayPresupuesto()) {
+    for (const [cat, tope] of Object.entries(S.presupuestos)) variable += Math.max(0, tope - (t?.porCat[cat] || 0) - (fijosPorCat[cat] || 0));
+  } else {
+    const fijosQ = Object.values(fijosPorCat).reduce((a, v) => a + v, 0);
+    variable = Math.max(0, promedioGastoMensual() / 2 - (t ? t.gasto : 0) - fijosQ);
+  }
+  return { q, entra, fijos, deudas, variable, sale: fijos + deudas + variable };
+}
+function proyeccion(n = 6) {
+  const hoy = hoyISO();
+  let q = `${hoy.slice(0, 7)}-${+hoy.slice(8, 10) <= 15 ? 1 : 2}`, saldo = totalCuentas();
+  const filas = [];
+  for (let i = 0; i < n; i++, q = moverPeriodo(q, 1)) {
+    const f = flujoQuincena(q, i === 0);
+    saldo += f.entra - f.sale;
+    filas.push({ ...f, saldo });
+  }
+  return filas;
+}
+function htmlProyeccion() {
+  const filas = proyeccion();
+  const sinIngresos = !S.fijos.some(f => f.tipo === 'ingreso');
+  const apretada = filas.find(f => f.saldo < 0);
+  return `<section class="card">
+    <h2>🔮 Próximas quincenas</h2>
+    <p class="small muted" style="margin-top:-6px">Parte de lo que tienes hoy en tus cuentas (${fmt(totalCuentas())}) y suma tus ingresos fijos; resta fijos, pagos de tarjetas, mensualidades y ${hayPresupuesto() ? 'tu presupuesto' : 'tu gasto promedio'}.</p>
+    ${sinIngresos ? '<div class="tip info"><span class="ic">💡</span><div>Da de alta tu <b>sueldo como ingreso fijo</b> (📌 + Fijo) para que la proyección sea real.</div></div>' : ''}
+    ${apretada ? `<div class="tip bad"><span class="ic">⚠️</span><div>En la <b>${nombrePeriodo(apretada.q)}</b> te faltarían <b>${fmt(-apretada.saldo)}</b>. Prepárate desde ahora: aparta dinero o recorta gastos antes de esa fecha.</div></div>` : ''}
+    <table class="plan proy">
+      <thead><tr><th>Quincena</th><th class="n">Entra</th><th class="n">Sale</th><th class="n">Te queda</th></tr></thead>
+      <tbody>${filas.map((f, i) => `<tr>
+        <td><b>${nombrePeriodo(f.q, true)}</b>${i === 0 ? ' <span class="muted small">hoy</span>' : ''}</td>
+        <td class="n c-ingreso">${fmt(f.entra)}</td>
+        <td class="n c-gasto">${fmt(f.sale)}</td>
+        <td class="n"><b style="color:${f.saldo < 0 ? 'var(--deuda)' : 'inherit'}">${fmt(f.saldo)}</b></td>
+      </tr><tr class="det"><td colspan="4">Fijos ${fmt(f.fijos)} · deudas ${fmt(f.deudas)} · día a día ${fmt(f.variable)}</td></tr>`).join('')}</tbody>
+    </table>
+    <p class="small muted" style="margin-bottom:0">Para tarjetas usa el pago mínimo. Si pagas más (recomendado), te quedará menos, pero bajará más rápido tu deuda.</p>
+  </section>`;
+}
+
 function htmlCuentas() {
   const total = totalCuentas();
   return `<section class="card">
@@ -653,6 +713,8 @@ const VISTAS = {
       ${htmlCompromisos(pend, proyectado)}
 
       ${htmlPresupuesto(t)}
+
+      ${htmlProyeccion()}
 
       <section class="card">
         <h2>🧑‍💼 Tu asesor dice</h2>

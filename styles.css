@@ -208,6 +208,9 @@ label.check { display: flex; gap: 8px; align-items: center; font-size: .9rem; ma
 table.plan { width: 100%; border-collapse: collapse; font-size: .88rem; }
 table.plan th, table.plan td { padding: 7px 4px; border-bottom: 1px solid var(--line); text-align: left; }
 table.plan td.n, table.plan th.n { text-align: right; font-variant-numeric: tabular-nums; }
+table.proy { font-size: .82rem; }
+table.proy tbody tr:not(.det) td { border-bottom: 0; padding-bottom: 0; }
+table.proy tr.det td { font-size: .72rem; color: var(--muted); padding-top: 2px; }
 .comparativo { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 10px 0; }
 .comparativo > div { border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
 .comparativo .gana { border-color: var(--accent); background: var(--accent-soft); }
