@@ -247,3 +247,13 @@ table.plan td.n, table.plan th.n { text-align: right; font-variant-numeric: tabu
 .resumen-fijos { border-top: 2px dashed var(--line); margin-top: 6px; padding-top: 10px; display: grid; gap: 4px; }
 @media (max-width: 380px) { #per-lbl { min-width: 0; font-size: .78rem; padding: 6px 6px; } }
 .badge.sem { background: var(--accent-soft); color: var(--accent); margin-left: 4px; vertical-align: 1px; }
+
+/* Versión y aviso de actualización */
+.badge.version { background: var(--accent-soft); color: var(--accent); font-size: .8rem; }
+#banner-act {
+  position: fixed; left: 12px; right: 12px; z-index: 15;
+  bottom: calc(84px + env(safe-area-inset-bottom));
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  background: #1f2937; color: #fff; padding: 10px 12px; border-radius: 12px;
+  box-shadow: 0 6px 16px rgba(0,0,0,.3); font-size: .9rem; max-width: 520px; margin: 0 auto;
+}

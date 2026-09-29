@@ -452,6 +452,7 @@ const VISTAS = {
           </div>`).join('') : '<p class="muted">Sin gastos registrados en este periodo.</p>'}
       </section>
 
+      <p class="small muted" style="text-align:center;margin:4px 0 0" data-tab="ajustes">Mis Finanzas v${VERSION}</p>
       ${totalDeuda > 0 ? `<section class="card row" data-tab="deudas" style="cursor:pointer">
         <div><h2 style="margin:0">Deuda total</h2><span class="muted small">${deudasActivas().length} cuenta(s) activas · ver plan</span></div>
         <div class="deuda-saldo">${fmt(totalDeuda)}</div>
@@ -583,6 +584,15 @@ const VISTAS = {
       </section>
 
       <section class="card">
+        <div class="row"><h2 style="margin:0">📱 Versión de la app</h2><span class="badge version">v${VERSION}</span></div>
+        <p class="small muted">Con internet, la app descarga sola la versión más reciente al abrirse.</p>
+        <div class="acciones" style="margin-top:0">
+          <button class="btn mini" data-action="buscar-actualizacion">Buscar actualización</button>
+          <button class="btn mini sec" data-action="ver-novedades">Ver novedades</button>
+        </div>
+      </section>
+
+      <section class="card">
         <h2>Instalar la app</h2>
         <p class="small muted">Instálala para abrirla como app y usarla sin conexión.</p>
         <button class="btn" data-action="instalar" id="btn-instalar" ${deferredInstall ? '' : 'hidden'}>Instalar en este dispositivo</button>
@@ -594,7 +604,7 @@ const VISTAS = {
         <button class="btn peligro" data-action="borrar-todo">Borrar todos los datos</button>
         <p class="small muted">Antes de borrar se crea un punto de restauración automáticamente.</p>
       </section>
-      <p class="small muted" style="text-align:center">Mis Finanzas · v1.0 · datos locales</p>
+      <p class="small muted" style="text-align:center">Mis Finanzas · v${VERSION} · datos locales</p>
     `;
   },
 };
@@ -682,6 +692,7 @@ function dialogo(titulo, html, onOk, textoOk = 'Guardar') {
   $('#dlg-title').textContent = titulo;
   $('#dlg-body').innerHTML = html;
   $('#dlg-ok').textContent = textoOk;
+  $('[data-action=cerrar-dlg]').hidden = false;
   $('#dlg-form').onsubmit = e => {
     e.preventDefault();
     const datos = Object.fromEntries(new FormData(e.target));
@@ -942,6 +953,9 @@ const ACCIONES = {
   filtro: el => { filtroMov = el.dataset.v; render(); },
   'mes-prev': () => cambiarMes(-1),
   'mes-next': () => cambiarMes(1),
+  'buscar-actualizacion': buscarActualizacion,
+  'ver-novedades': () => mostrarNovedades(null),
+  'actualizar-ya': () => location.reload(),
   'per-hoy': () => { per = periodoDe(hoyISO()); render(); },
   'nuevo-fijo': () => formFijo(),
   'editar-fijo': el => {
@@ -1069,6 +1083,67 @@ async function iniciar() {
   // Pide al navegador que no borre los datos por falta de espacio
   if (navigator.storage?.persist) navigator.storage.persist().catch(() => {});
   render();
-  if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
+  avisarSiSeActualizo();
+  registrarSW();
+}
+
+/* ---------- Versiones y actualizaciones ---------- */
+function htmlNovedades(desde) {
+  // desde = versión que tenía antes; null = mostrar todas
+  const lista = NOVEDADES.filter(n => !desde || compararVersion(n.v, desde) > 0);
+  return lista.map(n => `<h3 style="margin-top:10px">v${n.v} <span class="muted small">· ${fechaCorta(n.fecha)}</span></h3>
+    <ul class="small" style="margin:4px 0;padding-left:18px">${n.cambios.map(c => `<li>${esc(c)}</li>`).join('')}</ul>`).join('');
+}
+const compararVersion = (a, b) => { const x = a.split('.').map(Number), y = b.split('.').map(Number); for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] - y[i]; return 0; };
+
+function mostrarNovedades(desde) {
+  dialogo(desde ? `🎉 Actualizada a la versión ${VERSION}` : `Novedades · tienes la v${VERSION}`,
+    `<div style="max-height:55vh;overflow:auto">${htmlNovedades(desde)}</div>`, () => {}, 'Entendido');
+  $('[data-action=cerrar-dlg]').hidden = true;
+}
+
+// Al abrir: si la versión cambió desde la última vez, muestra qué hay de nuevo
+function avisarSiSeActualizo() {
+  let anterior = null;
+  try { anterior = localStorage.getItem('version-vista'); localStorage.setItem('version-vista', VERSION); } catch { return; }
+  // Quien ya usaba la app antes de que existiera este aviso venía de la 1.3.0
+  if (!anterior && (S.movs.length || S.fijos.length || S.deudas.length)) anterior = '1.3.0';
+  if (anterior && anterior !== VERSION) mostrarNovedades(anterior);
+}
+
+let swReg = null;
+function registrarSW() {
+  if (!('serviceWorker' in navigator) || location.protocol === 'file:') return;
+  const teniaControl = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(reg => {
+    swReg = reg;
+    // Revisa si hay versión nueva cada vez que vuelves a la app
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) reg.update().catch(() => {}); });
+  }).catch(() => {});
+  // Se instaló una versión nueva mientras la app estaba abierta
+  navigator.serviceWorker.addEventListener('controllerchange', () => { if (teniaControl) bannerActualizacion(); });
+}
+
+function bannerActualizacion(v) {
+  if ($('#banner-act')) return;
+  const b = document.createElement('div');
+  b.id = 'banner-act';
+  b.innerHTML = `<span>🔄 Hay una versión nueva${v ? ' (v' + esc(v) + ')' : ''} lista.</span><button class="btn mini" data-action="actualizar-ya">Actualizar</button>`;
+  document.body.append(b);
+}
+
+async function buscarActualizacion() {
+  if (!navigator.onLine) return toast('Sin internet: conéctate para buscar actualizaciones');
+  toast('Buscando actualización…');
+  try {
+    const txt = await (await fetch('version.js?t=' + Date.now(), { cache: 'no-store' })).text();
+    const remota = (txt.match(/VERSION = '([0-9.]+)'/) || [])[1];
+    if (!remota) throw new Error();
+    if (compararVersion(remota, VERSION) > 0) {
+      await swReg?.update().catch(() => {});
+      bannerActualizacion(remota);
+      toast(`Hay una versión nueva: v${remota}`);
+    } else toast(`✅ Tienes la versión más reciente (v${VERSION})`);
+  } catch { toast('No se pudo revisar. Intenta más tarde.'); }
 }
 iniciar();
