@@ -40,6 +40,7 @@ const estadoVacio = () => ({
   movs: [],     // {id, tipo:'ingreso'|'gasto'|'ahorro', monto, cat, fecha, nota, metaId?, deudaId?, histId?}
   metas: [],    // {id, nombre, objetivo, inicial, fechaMeta?}
   deudas: [],   // {id, nombre, tipo, saldoInicial, tasa, minimo, limite, diaCorte, diaPago, hist:[{id,fecha,tipo,monto}]}
+  msi: [],      // compras a meses {id, nombre, tarjetaId?, monto, meses, tasa (0 = MSI), primerMes:'YYYY-MM', diaPago, inicial, pagos:[{id,fecha,mes,monto}]}
   fijos: [],    // {id, tipo:'gasto'|'ingreso', nombre, monto, cat, cuando:'cada'|'q1'|'q2'|'semanal', dia?, diaSemana?}
   ajustes: { iva: true, estrategia: 'avalancha', presupuestoDeuda: 0, ultimoExport: null, modo: 'quincena' },
 });
@@ -157,6 +158,44 @@ const factorIVA = () => (S.ajustes.iva ? IVA : 1);
 const interesMensual = d => saldoDeuda(d) * d.tasa / 100 / 12 * factorIVA();
 const deudasActivas = () => S.deudas.filter(d => saldoDeuda(d) > 0.5);
 
+/* ---------- Compras a meses (MSI o con intereses) ---------- */
+const sumarMeses = (ym, n) => { const [y, m] = ym.split('-').map(Number); const d = new Date(y, m - 1 + n, 1); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; };
+const mesesEntre = (a, b) => { const [y1, m1] = a.split('-').map(Number), [y2, m2] = b.split('-').map(Number); return (y2 - y1) * 12 + m2 - m1; };
+// Mensualidad fija: MSI = monto / meses; con intereses = amortización (tasa mensual + IVA)
+function mensualidad(c) {
+  if (!c.tasa) return c.monto / c.meses;
+  const i = c.tasa / 100 / 12 * factorIVA();
+  return c.monto * i / (1 - Math.pow(1 + i, -c.meses));
+}
+const pagadasMSI = c => Math.min(c.meses, c.inicial + c.pagos.length);
+const restantesMSI = c => c.meses - pagadasMSI(c);
+const saldoMSI = c => restantesMSI(c) * mensualidad(c); // lo que falta por pagar
+const finMSI = c => sumarMeses(c.primerMes, c.meses - 1);
+const msiActivas = () => S.msi.filter(c => restantesMSI(c) > 0);
+const mensualidadesMes = () => msiActivas().reduce((a, c) => a + mensualidad(c), 0);
+// Mensualidad del mes ym: las primeras "inicial" se pagaron antes de registrar la compra
+const msiPagadaEn = (c, ym) => mesesEntre(c.primerMes, ym) < c.inicial || c.pagos.some(p => p.mes === ym);
+const siguienteMesMSI = c => { for (let k = 0; k < c.meses; k++) { const ym = sumarMeses(c.primerMes, k); if (!msiPagadaEn(c, ym)) return ym; } return null; };
+const msiDeTarjeta = d => msiActivas().filter(c => c.tarjetaId === d.id);
+
+function pagarMSI(c, ym, fecha) {
+  const p = { id: uid(), fecha, mes: ym, monto: Math.round(mensualidad(c) * 100) / 100 };
+  c.pagos.push(p);
+  S.movs.push({ id: uid(), tipo: 'gasto', monto: p.monto, cat: 'Pago de deuda', fecha, nota: `${c.nombre} (${mesesEntre(c.primerMes, ym) + 1}/${c.meses})`, msiId: c.id, pagoId: p.id });
+}
+function quitarPagoMSI(c, ym) {
+  const p = c.pagos.find(x => x.mes === ym);
+  if (!p) return;
+  c.pagos = c.pagos.filter(x => x !== p);
+  S.movs = S.movs.filter(m => m.pagoId !== p.id);
+}
+
+function promedioIngresoMensual() {
+  const meses = [...new Set(S.movs.map(x => mesDe(x.fecha)))].sort().reverse().slice(0, 3);
+  if (!meses.length) return 0;
+  return meses.reduce((a, m) => a + totales(m).ingreso, 0) / meses.length;
+}
+
 function promedioGastoMensual() {
   // Promedio de gastos (sin pagos de deuda) de los últimos 3 meses con registros
   const meses = [...new Set(S.movs.map(x => mesDe(x.fecha)))].sort().reverse().slice(0, 3);
@@ -190,14 +229,19 @@ function compromisos(p) {
     const tarjetas = deudasActivas()
       .filter(d => { const dia = Math.min(d.diaPago || 0, ultimoDia); return dia >= dIni && dia <= dFin; })
       .map(d => ({ d, pagado: d.hist.some(h => h.tipo === 'pago' && enRango(h.fecha, r)) }));
-    return { q, r, fijos, tarjetas };
+    const ym = q.slice(0, 7);
+    const meses = S.msi
+      .filter(c => { const k = mesesEntre(c.primerMes, ym), dia = Math.min(c.diaPago || 1, ultimoDia); return k >= 0 && k < c.meses && dia >= dIni && dia <= dFin; })
+      .map(c => ({ c, ym, pagado: msiPagadaEn(c, ym) }));
+    return { q, r, fijos, tarjetas, meses };
   });
 }
 function pendientes(p) {
   let gasto = 0, ingreso = 0, tarjetas = 0;
-  for (const c of compromisos(p)) {
-    for (const { f, mov } of c.fijos) if (!mov) f.tipo === 'ingreso' ? ingreso += f.monto : gasto += f.monto;
-    for (const { d, pagado } of c.tarjetas) if (!pagado) tarjetas += Math.min(d.minimo, saldoDeuda(d));
+  for (const b of compromisos(p)) {
+    for (const { f, mov } of b.fijos) if (!mov) f.tipo === 'ingreso' ? ingreso += f.monto : gasto += f.monto;
+    for (const { d, pagado } of b.tarjetas) if (!pagado) tarjetas += Math.min(d.minimo, saldoDeuda(d));
+    for (const { c, pagado } of b.meses) if (!pagado) tarjetas += mensualidad(c);
   }
   return { gasto, ingreso, tarjetas };
 }
@@ -312,10 +356,21 @@ function consejos(t) {
     if (d.limite > 0 && saldoDeuda(d) / d.limite > 0.3) add('warn', '📉', `<b>${esc(d.nombre)}</b> usa el ${pct(saldoDeuda(d) / d.limite)} de su línea. Mantenerlo bajo 30% mejora tu historial en Buró de Crédito.`);
   }
   if (activas.some(d => d.tipo === 'dep' && d.tasa >= 50)) add('info', '🏬', 'Las tarjetas departamentales suelen tener tasas muy altas (60%–100% anual). Deja de usarlas mientras las liquidas y evita "meses sin intereses" que no puedas cubrir.');
-  if (ing > 0 && totalDeuda > 0) {
-    const pagoMin = activas.reduce((a, d) => a + d.minimo, 0);
-    const r = pagoMin / ing;
-    if (r > 0.3) add('bad', '⚖️', `Tus pagos mínimos equivalen al ${pct(r)} de tu ingreso. Arriba del 30% es zona de riesgo: no adquieras nuevas deudas.`);
+  // Los pagos son mensuales: se comparan contra el ingreso mensual (no el de la quincena)
+  const ingMes = promedioIngresoMensual() || (esMes() ? ing : ing * 2);
+  const mensMSI = mensualidadesMes();
+  if (ingMes > 0 && (totalDeuda > 0 || mensMSI > 0)) {
+    const pagoMin = activas.reduce((a, d) => a + d.minimo, 0) + mensMSI;
+    const r = pagoMin / ingMes;
+    if (r > 0.3) add('bad', '⚖️', `Tus pagos mínimos y mensualidades (${fmt(pagoMin)}/mes) equivalen al ${pct(r)} de tu ingreso. Arriba del 30% es zona de riesgo: no adquieras nuevas deudas.`);
+  }
+  if (mensMSI > 0) {
+    if (ingMes > 0 && mensMSI / ingMes > 0.15) add('warn', '🛍️', `Tus compras a meses te comprometen ${fmt(mensMSI)} al mes (${pct(mensMSI / ingMes)} de tu ingreso). Arriba del 10–15% ya pesa: evita nuevas compras a meses hasta terminar alguna.`);
+    if (msiActivas().some(c => c.tarjetaId)) add('info', '🛍️', 'Las mensualidades a meses forman parte del <b>pago para no generar intereses</b> de tu tarjeta. Si un mes pagas menos de ese total, el banco puede cobrarte intereses sobre el saldo.');
+    for (const c of msiActivas().filter(c => c.tasa > 0)) {
+      const total = mensualidad(c) * c.meses;
+      add('info', '💡', `<b>${esc(c.nombre)}</b> a meses con intereses: pagarás ${fmt(total)} por una compra de ${fmt(c.monto)} (${fmt(total - c.monto)} de intereses). Si puedes, adelanta pagos.`);
+    }
   }
 
   const emergencia = S.metas.find(m => /emergencia/i.test(m.nombre));
@@ -344,7 +399,7 @@ function render() {
 
 function htmlCompromisos(pend, proyectado) {
   const bloques = compromisos(per);
-  const hayAlgo = bloques.some(b => b.fijos.length || b.tarjetas.length);
+  const hayAlgo = bloques.some(b => b.fijos.length || b.tarjetas.length || b.meses.length);
   const titulo = esMes() ? 'Fijos del mes' : 'Fijos de la quincena';
   if (!hayAlgo) return `<section class="card">
     <div class="row"><h2 style="margin:0">📌 ${titulo}</h2><button class="btn mini" data-action="nuevo-fijo">+ Agregar fijo</button></div>
@@ -366,7 +421,14 @@ function htmlCompromisos(pend, proyectado) {
         <button class="check-btn ${pagado ? 'on' : ''}" data-action="pagar-deuda" data-id="${d.id}" aria-label="Registrar pago de ${esc(d.nombre)}" ${pagado ? 'disabled' : ''}>${pagado ? '✓' : ''}</button>
         <div class="info"><b>💳 ${esc(d.nombre)}</b><span class="muted small">Pago mínimo · vence día ${d.diaPago}</span></div>
         <span class="monto c-deuda">− ${fmt(Math.min(d.minimo, saldoDeuda(d)))}</span>
-      </li>`)).join('');
+      </li>`)).concat(b.meses.map(({ c, ym, pagado }) => {
+        const previa = mesesEntre(c.primerMes, ym) < c.inicial;
+        return `<li class="${pagado ? 'hecho' : ''}">
+        <button class="check-btn ${pagado ? 'on' : ''}" data-action="marcar-msi" data-id="${c.id}" data-mes="${ym}" data-q="${b.q}" aria-label="${pagado ? 'Desmarcar' : 'Marcar mensualidad pagada'}" ${previa ? 'disabled' : ''}>${pagado ? '✓' : ''}</button>
+        <div class="info"><b>🛍️ ${esc(c.nombre)}</b><span class="muted small">${c.tasa ? 'A meses' : 'MSI'} · mensualidad ${mesesEntre(c.primerMes, ym) + 1} de ${c.meses} · día ${c.diaPago}</span></div>
+        <span class="monto c-deuda">− ${fmt(mensualidad(c))}</span>
+      </li>`;
+      })).join('');
     return (esMes() ? `<p class="dia">${nombrePeriodo(b.q)}</p>` : '') + `<ul class="lista">${items || '<li class="muted small">Nada programado.</li>'}</ul>`;
   }).join('');
 
@@ -375,7 +437,7 @@ function htmlCompromisos(pend, proyectado) {
     ${cuerpo}
     <div class="resumen-fijos">
       ${pend.ingreso ? `<div class="row small"><span>Por recibir</span><b class="c-ingreso">${fmt(pend.ingreso)}</b></div>` : ''}
-      <div class="row small"><span>Por pagar (fijos + tarjetas)</span><b class="c-gasto">${fmt(pend.gasto + pend.tarjetas)}</b></div>
+      <div class="row small"><span>Por pagar (fijos, tarjetas y meses)</span><b class="c-gasto">${fmt(pend.gasto + pend.tarjetas)}</b></div>
       <div class="row"><span><b>Te quedará libre</b></span><b style="font-size:1.1rem;color:${proyectado < 0 ? 'var(--deuda)' : 'var(--ingreso)'}">${fmt(proyectado)}</b></div>
     </div>
     ${nPend > 1 ? `<button class="btn mini sec" data-action="marcar-todos" style="width:100%;margin-top:10px">Marcar todos los fijos pendientes</button>` : ''}
@@ -388,7 +450,7 @@ const VISTAS = {
     const pend = pendientes(per);
     const proyectado = t.libre + pend.ingreso - pend.gasto - pend.tarjetas;
     const ing = t.ingreso || 1;
-    const totalDeuda = deudasActivas().reduce((a, d) => a + saldoDeuda(d), 0);
+    const totalDeuda = deudasActivas().reduce((a, d) => a + saldoDeuda(d), 0) + msiActivas().reduce((a, c) => a + saldoMSI(c), 0);
     const cats = Object.entries(t.porCat).sort((a, b) => b[1] - a[1]);
     const maxCat = cats[0]?.[1] || 1;
 
@@ -454,7 +516,7 @@ const VISTAS = {
 
       <p class="small muted" style="text-align:center;margin:4px 0 0" data-tab="ajustes">Mis Finanzas v${VERSION}</p>
       ${totalDeuda > 0 ? `<section class="card row" data-tab="deudas" style="cursor:pointer">
-        <div><h2 style="margin:0">Deuda total</h2><span class="muted small">${deudasActivas().length} cuenta(s) activas · ver plan</span></div>
+        <div><h2 style="margin:0">Deuda total</h2><span class="muted small">${deudasActivas().length} cuenta(s)${msiActivas().length ? ` y ${msiActivas().length} compra(s) a meses` : ''} · ver plan</span></div>
         <div class="deuda-saldo">${fmt(totalDeuda)}</div>
       </section>` : ''}
     `;
@@ -479,7 +541,7 @@ const VISTAS = {
         <span style="font-size:1.3rem">${ic}</span>
         <div class="info"><b>${esc(x.cat)}</b><span class="muted small">${esc(x.nota) || '&nbsp;'}</span></div>
         <span class="monto ${color}">${signo} ${fmt(Math.abs(x.monto))}</span>
-        ${!x.metaId && !x.deudaId ? `<button class="link-btn" data-action="editar-mov" data-id="${x.id}" aria-label="Editar">✏️</button>` : ''}
+        ${!x.metaId && !x.deudaId && !x.msiId ? `<button class="link-btn" data-action="editar-mov" data-id="${x.id}" aria-label="Editar">✏️</button>` : ''}
         <button class="link-btn" data-action="borrar-mov" data-id="${x.id}" aria-label="Eliminar">🗑️</button>
       </li>`;
     }
@@ -526,25 +588,34 @@ const VISTAS = {
 
   deudas() {
     const activas = deudasActivas();
-    const liquidadas = S.deudas.filter(d => saldoDeuda(d) <= 0.5);
+    const liquidadas = S.deudas.filter(d => saldoDeuda(d) <= 0.5 && !msiDeTarjeta(d).length);
     const total = activas.reduce((a, d) => a + saldoDeuda(d), 0);
     const sumMin = activas.reduce((a, d) => a + d.minimo, 0);
     const intMes = activas.reduce((a, d) => a + interesMensual(d), 0);
+    const totalMSI = msiActivas().reduce((a, c) => a + saldoMSI(c), 0);
+    const mensMSI = mensualidadesMes();
+    // Una tarjeta en ceros pero con compras a meses sigue activa
+    const visibles = S.deudas.filter(d => saldoDeuda(d) > 0.5 || msiDeTarjeta(d).length);
 
-    if (!S.deudas.length) return `<div class="card vacio"><div class="big">💳</div>
-      <p>Registra tus tarjetas de crédito y departamentales.<br>Te armo un plan para liquidarlas y te digo cuánto ahorras en intereses.</p>
-      <button class="btn" data-action="nueva-deuda">Agregar deuda</button></div>`;
+    if (!S.deudas.length && !S.msi.length) return `<div class="card vacio"><div class="big">💳</div>
+      <p>Registra tus tarjetas de crédito y departamentales, y tus compras a meses (MSI).<br>Te armo un plan para liquidarlas y te digo cuánto ahorras en intereses.</p>
+      <div class="acciones" style="justify-content:center">
+        <button class="btn" data-action="nueva-deuda">Agregar tarjeta o deuda</button>
+        <button class="btn sec" data-action="nuevo-msi">Agregar compra a meses</button>
+      </div></div>`;
 
     let html = `<div class="kpis" style="grid-template-columns:repeat(3,1fr)">
-      <div class="kpi"><div class="lbl">Deuda total</div><div class="val c-deuda">${fmt(total)}</div></div>
-      <div class="kpi"><div class="lbl">Mínimos / mes</div><div class="val">${fmt(sumMin)}</div></div>
+      <div class="kpi"><div class="lbl">Deuda total</div><div class="val c-deuda">${fmt(total + totalMSI)}</div></div>
+      <div class="kpi"><div class="lbl">A pagar / mes</div><div class="val">${fmt(sumMin + mensMSI)}</div></div>
       <div class="kpi"><div class="lbl">Intereses / mes</div><div class="val c-deuda">${fmt(intMes)}</div></div>
     </div>`;
+    if (mensMSI > 0 && activas.length) html += `<p class="small muted" style="margin:-6px 0 12px">A pagar al mes = mínimos de tarjetas (${fmt(sumMin)}) + mensualidades a meses (${fmt(mensMSI)}).</p>`;
 
-    if (activas.length) html += planHTML(activas, sumMin);
+    if (activas.length) html += planHTML(activas, sumMin, mensMSI);
 
-    for (const d of activas) html += tarjetaDeuda(d);
-    html += `<button class="btn sec" data-action="nueva-deuda" style="width:100%;margin-bottom:14px">+ Agregar deuda</button>`;
+    for (const d of visibles) html += tarjetaDeuda(d);
+    html += `<button class="btn sec" data-action="nueva-deuda" style="width:100%;margin-bottom:14px">+ Agregar tarjeta o deuda</button>`;
+    html += seccionMSI();
     if (liquidadas.length) html += `<section class="card"><h2>🎉 Liquidadas</h2><ul class="lista">${liquidadas.map(d =>
       `<li><div class="info"><b>${esc(d.nombre)}</b><span class="muted small">${TIPOS_DEUDA[d.tipo]}</span></div>
        <button class="link-btn" data-action="borrar-deuda" data-id="${d.id}" aria-label="Eliminar">🗑️</button></li>`).join('')}</ul></section>`;
@@ -609,7 +680,7 @@ const VISTAS = {
   },
 };
 
-function planHTML(activas, sumMin) {
+function planHTML(activas, sumMin, mensMSI = 0) {
   const est = S.ajustes.estrategia;
   let presupuesto = S.ajustes.presupuestoDeuda || Math.ceil(sumMin);
   const r = simular(presupuesto, est);
@@ -650,6 +721,34 @@ function planHTML(activas, sumMin) {
       <span class="hint">Equivale a <b>${fmt(presupuesto / 2)} por quincena</b>. Mínimo necesario: ${fmt(sumMin)} al mes. Cada peso extra reduce intereses y tiempo.</span>
     </label>
     ${cuerpo}
+    ${mensMSI > 0 ? `<p class="small muted">Aparte pagas ${fmt(mensMSI)}/mes de compras a meses. No entran a este plan porque ya tienen plazo fijo: sepáralo además de este presupuesto.</p>` : ''}
+  </section>`;
+}
+
+function seccionMSI() {
+  const activas = msiActivas();
+  const terminadas = S.msi.filter(c => restantesMSI(c) <= 0);
+  const mens = mensualidadesMes();
+  const nombreTarjeta = id => S.deudas.find(d => d.id === id)?.nombre;
+  const items = activas.map(c => {
+    const pag = pagadasMSI(c), m = mensualidad(c), total = m * c.meses;
+    return `<div class="msi">
+      <div class="row"><b>${esc(c.nombre)} <span class="badge ${c.tasa ? 'dep' : 'sem'}">${c.tasa ? c.tasa + '% anual' : 'MSI'}</span></b><b class="c-deuda">${fmt(m)}<span class="muted small">/mes</span></b></div>
+      <div class="small muted">${nombreTarjeta(c.tarjetaId) ? '💳 ' + esc(nombreTarjeta(c.tarjetaId)) + ' · ' : ''}Pagadas ${pag} de ${c.meses} · termina en ${nombrePeriodo(finMSI(c))} · día ${c.diaPago}</div>
+      <div class="bar" style="margin:6px 0"><span style="width:${pag / c.meses * 100}%;background:var(--accent)"></span></div>
+      <div class="row small"><span>Te falta: <b>${fmt(saldoMSI(c))}</b> (${restantesMSI(c)} mensualidad${restantesMSI(c) === 1 ? '' : 'es'})</span>${c.tasa ? `<span class="c-deuda">Intereses: ${fmt(total - c.monto)}</span>` : ''}</div>
+      <div class="acciones">
+        <button class="btn mini" data-action="pagar-msi" data-id="${c.id}">Registrar mensualidad</button>
+        <button class="btn mini sec" data-action="editar-msi" data-id="${c.id}">Editar</button>
+        <button class="btn mini sec" data-action="borrar-msi" data-id="${c.id}">Eliminar</button>
+      </div>
+    </div>`;
+  }).join('');
+  return `<section class="card">
+    <div class="row"><h2 style="margin:0">🛍️ Compras a meses</h2><button class="btn mini" data-action="nuevo-msi">+ Compra</button></div>
+    ${activas.length ? items + `<div class="resumen-fijos"><div class="row"><span>Mensualidades al mes</span><b>${fmt(mens)}</b></div><div class="row small muted"><span>Por quincena, aprox.</span><span>${fmt(mens / 2)}</span></div></div>`
+      : '<p class="small muted" style="margin-bottom:0">Registra tus compras a meses sin intereses (MSI) o con intereses: te digo cuánto pagas al mes, cuántas mensualidades te faltan y cuándo terminas.</p>'}
+    ${terminadas.length ? `<p class="dia">Terminadas 🎉</p><ul class="lista">${terminadas.map(c => `<li><div class="info"><b>${esc(c.nombre)}</b><span class="muted small">${c.meses} mensualidades · ${fmt(c.monto)}</span></div><button class="link-btn" data-action="borrar-msi" data-id="${c.id}" aria-label="Eliminar">🗑️</button></li>`).join('')}</ul>` : ''}
   </section>`;
 }
 
@@ -658,7 +757,9 @@ function tarjetaDeuda(d) {
   const i = interesMensual(d);
   const pago = proximaFecha(d.diaPago);
   const corte = proximaFecha(d.diaCorte);
-  const uso = d.limite > 0 ? s / d.limite : null;
+  const ligadas = msiDeTarjeta(d);
+  const sMSI = ligadas.reduce((a, c) => a + saldoMSI(c), 0), mMSI = ligadas.reduce((a, c) => a + mensualidad(c), 0);
+  const uso = d.limite > 0 ? (s + sMSI) / d.limite : null;
   const cls = d.tipo === 'dep' ? 'dep' : d.tipo === 'tc' ? 'tc' : '';
   const ultimos = [...d.hist].sort((a, b) => b.fecha.localeCompare(a.fecha)).slice(0, 3);
   return `<section class="card">
@@ -667,15 +768,16 @@ function tarjetaDeuda(d) {
       <div style="text-align:right"><div class="deuda-saldo">${fmt(s)}</div><span class="small muted">saldo actual</span></div>
     </div>
     ${uso != null ? `<div class="bar" style="margin-top:10px"><span style="width:${Math.min(100, uso * 100)}%;background:${uso > 0.3 ? 'var(--deuda)' : 'var(--accent)'}"></span></div>
-      <div class="small muted" style="margin-top:3px">Uso de línea: ${pct(uso)} de ${fmt(d.limite)}</div>` : ''}
+      <div class="small muted" style="margin-top:3px">Uso de línea: ${pct(uso)} de ${fmt(d.limite)}${sMSI ? ' (incluye compras a meses)' : ''}</div>` : ''}
+    ${ligadas.length ? `<div class="tip info"><span class="ic">🛍️</span><div>${ligadas.length} compra${ligadas.length > 1 ? 's' : ''} a meses en esta tarjeta: <b>${fmt(mMSI)}/mes</b> (te faltan ${fmt(sMSI)}). Súmalo a tu pago de cada mes.</div></div>` : ''}
     <div class="datos">
       <div>Tasa anual<b>${d.tasa}%</b></div>
       <div>Pago mínimo<b>${fmt(d.minimo)}</b></div>
-      <div>Interés / mes<b class="${d.minimo <= i ? 'c-deuda' : ''}">${fmt(i)}</b></div>
+      <div>Interés / mes<b class="${i > 0 && d.minimo <= i ? 'c-deuda' : ''}">${fmt(i)}</b></div>
       ${corte ? `<div>Corte<b>${corte.fecha.getDate()} ${MESES[corte.fecha.getMonth()]}</b></div>` : ''}
       ${pago ? `<div>Pagar antes de<b style="${pago.dias <= 5 ? 'color:var(--deuda)' : ''}">${pago.fecha.getDate()} ${MESES[pago.fecha.getMonth()]}</b></div><div>Faltan<b>${pago.dias} día${pago.dias === 1 ? '' : 's'}</b></div>` : ''}
     </div>
-    ${d.minimo <= i ? `<div class="tip bad"><span class="ic">⛔</span><div>El mínimo no cubre los intereses: esta deuda crece cada mes.</div></div>` : ''}
+    ${i > 0 && d.minimo <= i ? `<div class="tip bad"><span class="ic">⛔</span><div>El mínimo no cubre los intereses: esta deuda crece cada mes.</div></div>` : ''}
     ${ultimos.length ? `<ul class="lista small" style="margin-top:8px">${ultimos.map(h => `<li><span>${h.tipo === 'pago' ? '✅' : '🛍️'}</span><div class="info">${h.tipo === 'pago' ? 'Pago' : h.tipo === 'interes' ? 'Intereses / comisiones' : 'Cargo'} · <span class="muted">${fechaCorta(h.fecha)}</span></div><span class="monto ${h.tipo === 'pago' ? 'c-ingreso' : 'c-deuda'}">${h.tipo === 'pago' ? '−' : '+'}${fmt(h.monto)}</span></li>`).join('')}</ul>` : ''}
     <div class="acciones">
       <button class="btn mini" data-action="pagar-deuda" data-id="${d.id}">Registrar pago</button>
@@ -691,6 +793,7 @@ function dialogo(titulo, html, onOk, textoOk = 'Guardar') {
   const dlg = $('#dlg');
   $('#dlg-title').textContent = titulo;
   $('#dlg-body').innerHTML = html;
+  $('#dlg-body').oninput = $('#dlg-body').onchange = null; // limpia listeners de un formulario anterior
   $('#dlg-ok').textContent = textoOk;
   $('[data-action=cerrar-dlg]').hidden = false;
   $('#dlg-form').onsubmit = e => {
@@ -843,6 +946,59 @@ function formDeuda(deuda) {
   });
 }
 
+function formMSI(compra) {
+  const x = compra || { nombre: '', tarjetaId: '', monto: '', meses: 12, tasa: 0, primerMes: sumarMeses(hoyISO().slice(0, 7), 1), diaPago: '', inicial: 0 };
+  const conInt = x.tasa > 0;
+  dialogo(compra ? 'Editar compra a meses' : 'Nueva compra a meses', `
+    ${campo('¿Qué compraste?', `name="nombre" required maxlength="40" value="${esc(x.nombre)}" placeholder="Ej. Pantalla, celular, refrigerador…"`)}
+    <label class="campo">¿Con qué tarjeta?<select name="tarjetaId"><option value="">Sin tarjeta / crédito directo de tienda</option>${S.deudas.map(d => `<option value="${d.id}" ${d.id === x.tarjetaId ? 'selected' : ''}>${esc(d.nombre)}</option>`).join('')}</select></label>
+    <div class="segmento">
+      <input type="radio" name="conInt" id="m-0" value="0" ${conInt ? '' : 'checked'}><label for="m-0" class="ing">Sin intereses (MSI)</label>
+      <input type="radio" name="conInt" id="m-1" value="1" ${conInt ? 'checked' : ''}><label for="m-1" class="gas">Con intereses</label>
+    </div>
+    <div class="grid2">
+      ${campo('Monto de la compra', `name="monto" type="number" inputmode="decimal" step="0.01" min="1" required value="${x.monto}"`)}
+      ${campo('Número de meses', `name="meses" type="number" min="1" max="72" required list="plazos" value="${x.meses}"`)}
+    </div>
+    <datalist id="plazos"><option value="3"><option value="6"><option value="9"><option value="12"><option value="18"><option value="24"><option value="36"></datalist>
+    <div id="campo-tasa" ${conInt ? '' : 'hidden'}>${campo('Tasa de interés anual %', `name="tasa" type="number" inputmode="decimal" step="0.01" min="0" max="300" value="${x.tasa || ''}"`, 'Viene en tu contrato o estado de cuenta')}</div>
+    <div class="grid2">
+      ${campo('Primera mensualidad', `name="primerMes" type="month" required value="${x.primerMes}"`)}
+      ${campo('Día de pago', `name="diaPago" type="number" min="1" max="31" value="${x.diaPago || ''}"`, 'El de tu tarjeta')}
+    </div>
+    ${campo('Mensualidades ya pagadas', `name="inicial" type="number" min="0" max="72" value="${x.inicial}"`, 'Si la compra es de antes, cuántas llevas pagadas')}
+    <div class="tip info" id="msi-prev"><span class="ic">🧮</span><div></div></div>
+  `, d => {
+    const monto = num(d.monto), meses = parseInt(d.meses) || 0, tasa = d.conInt === '1' ? num(d.tasa) : 0;
+    if (monto <= 0 || meses < 1) return toast('Revisa el monto y los meses'), false;
+    if (d.conInt === '1' && tasa <= 0) return toast('Indica la tasa de interés'), false;
+    const tarjeta = S.deudas.find(t => t.id === d.tarjetaId);
+    const datos = { nombre: d.nombre.trim(), tarjetaId: d.tarjetaId || null, monto, meses, tasa, primerMes: d.primerMes,
+      diaPago: parseInt(d.diaPago) || tarjeta?.diaPago || 1, inicial: Math.min(parseInt(d.inicial) || 0, meses) };
+    if (compra) Object.assign(compra, datos); else S.msi.push({ id: uid(), ...datos, pagos: [] });
+    toast('🛍️ Compra a meses guardada');
+  });
+  // Vista previa en vivo de la mensualidad
+  const body = $('#dlg-body');
+  const val = n => body.querySelector(`[name=${n}]`);
+  const previa = () => {
+    const conI = body.querySelector('[name=conInt]:checked').value === '1';
+    const c = { monto: num(val('monto').value), meses: parseInt(val('meses').value) || 0, tasa: conI ? num(val('tasa').value) : 0, primerMes: val('primerMes').value };
+    const out = $('#msi-prev div');
+    if (!c.monto || !c.meses || !c.primerMes) { out.textContent = 'Llena monto, meses y primera mensualidad para ver el cálculo.'; return; }
+    const m = mensualidad(c), total = m * c.meses;
+    out.innerHTML = `Mensualidad: <b>${fmt(m)}</b> (≈ ${fmt(m / 2)} por quincena). Terminas en <b>${nombrePeriodo(sumarMeses(c.primerMes, c.meses - 1))}</b>.`
+      + (c.tasa ? `<br>Pagarás ${fmt(total)} en total: <b class="c-deuda">${fmt(total - c.monto)} de intereses</b>.` : '');
+  };
+  body.oninput = previa;
+  body.onchange = e => {
+    if (e.target.name === 'conInt') $('#campo-tasa').hidden = e.target.value !== '1';
+    if (e.target.name === 'tarjetaId' && !val('diaPago').value) { const t = S.deudas.find(t => t.id === e.target.value); if (t?.diaPago) val('diaPago').value = t.diaPago; }
+    previa();
+  };
+  previa();
+}
+
 function formPago(d) {
   const s = saldoDeuda(d);
   dialogo(`Pago a ${d.nombre}`, `
@@ -928,6 +1084,7 @@ async function exportar() {
 
 function validarDatos(d) {
   if (d && !Array.isArray(d.fijos)) d.fijos = [];
+  if (d && !Array.isArray(d.msi)) d.msi = [];
   return d && Array.isArray(d.movs) && Array.isArray(d.metas) && Array.isArray(d.deudas) && typeof d.ajustes === 'object';
 }
 async function aplicarDatos(d, msg) {
@@ -945,8 +1102,9 @@ const ACCIONES = {
   'editar-mov': el => formMov(buscarId(S.movs, el.dataset.id)),
   'borrar-mov': el => {
     const m = buscarId(S.movs, el.dataset.id);
-    confirmar('Eliminar movimiento', `¿Eliminar <b>${esc(m.cat)}</b> por ${fmt(Math.abs(m.monto))}?${m.histId ? '<br><span class="small muted">También se quitará el pago del historial de la deuda.</span>' : ''}`, () => {
+    confirmar('Eliminar movimiento', `¿Eliminar <b>${esc(m.cat)}</b> por ${fmt(Math.abs(m.monto))}?${m.histId || m.pagoId ? '<br><span class="small muted">También se quitará el pago del historial de la deuda.</span>' : ''}`, () => {
       if (m.deudaId) { const d = buscarId(S.deudas, m.deudaId); if (d) d.hist = d.hist.filter(h => h.id !== m.histId); }
+      if (m.msiId) { const c = buscarId(S.msi, m.msiId); if (c) c.pagos = c.pagos.filter(p => p.id !== m.pagoId); }
       S.movs = S.movs.filter(x => x !== m);
     });
   },
@@ -1005,6 +1163,29 @@ const ACCIONES = {
   },
   aportar: el => formAporte(buscarId(S.metas, el.dataset.id), false),
   retirar: el => formAporte(buscarId(S.metas, el.dataset.id), true),
+  'nuevo-msi': () => formMSI(),
+  'editar-msi': el => formMSI(buscarId(S.msi, el.dataset.id)),
+  'pagar-msi': el => {
+    const c = buscarId(S.msi, el.dataset.id);
+    const ym = siguienteMesMSI(c);
+    if (!ym) return toast('Esta compra ya está pagada');
+    pagarMSI(c, ym, hoyISO());
+    guardar(); render();
+    toast(restantesMSI(c) ? `✅ Mensualidad ${mesesEntre(c.primerMes, ym) + 1} de ${c.meses} registrada` : `🎉 ¡Terminaste de pagar ${c.nombre}!`);
+  },
+  'marcar-msi': el => {
+    const c = buscarId(S.msi, el.dataset.id), ym = el.dataset.mes;
+    if (c.pagos.some(p => p.mes === ym)) { quitarPagoMSI(c, ym); toast('Desmarcado'); }
+    else { pagarMSI(c, ym, fechaFijo({ dia: c.diaPago }, rango(el.dataset.q))); toast(`✅ ${c.nombre}: mensualidad pagada`); }
+    guardar(); render();
+  },
+  'borrar-msi': el => {
+    const c = buscarId(S.msi, el.dataset.id);
+    confirmar('Eliminar compra a meses', `¿Eliminar <b>${esc(c.nombre)}</b>? Los pagos ya registrados como gasto se conservan.`, () => {
+      S.msi = S.msi.filter(x => x !== c);
+      S.movs.forEach(m => { if (m.msiId === c.id) { delete m.msiId; delete m.pagoId; } });
+    });
+  },
   'nueva-deuda': () => formDeuda(),
   'editar-deuda': el => formDeuda(buscarId(S.deudas, el.dataset.id)),
   'pagar-deuda': el => formPago(buscarId(S.deudas, el.dataset.id)),
@@ -1014,6 +1195,7 @@ const ACCIONES = {
     confirmar('Eliminar deuda', `¿Eliminar <b>${esc(d.nombre)}</b>? Los pagos ya registrados como gasto se conservan.`, () => {
       S.deudas = S.deudas.filter(x => x !== d);
       S.movs.forEach(m => { if (m.deudaId === d.id) { delete m.deudaId; delete m.histId; } });
+      S.msi.forEach(c => { if (c.tarjetaId === d.id) c.tarjetaId = null; });
     });
   },
   estrategia: el => { S.ajustes.estrategia = el.dataset.v; guardar(); render(); },

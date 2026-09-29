@@ -257,3 +257,7 @@ table.plan td.n, table.plan th.n { text-align: right; font-variant-numeric: tabu
   background: #1f2937; color: #fff; padding: 10px 12px; border-radius: 12px;
   box-shadow: 0 6px 16px rgba(0,0,0,.3); font-size: .9rem; max-width: 520px; margin: 0 auto;
 }
+
+/* Compras a meses */
+.msi { border-top: 1px solid var(--line); padding: 12px 0 4px; margin-top: 10px; }
+.msi .badge { vertical-align: 1px; }
