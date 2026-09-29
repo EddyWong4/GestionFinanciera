@@ -1,8 +1,12 @@
 // Versión de la app. Súbela en cada cambio publicado: la usan app.js (pantalla y avisos)
 // y sw.js (nombre de la caché, para que la app instalada descargue la versión nueva).
-const VERSION = '1.14.2';
+const VERSION = '1.14.3';
 
 const NOVEDADES = [
+  { v: '1.14.3', fecha: '2026-09-30', cambios: [
+    '"Dinero libre" ahora se llama "Balance de la quincena" (lo que entró menos lo que salió) y muestra cuánto tienes en tus cuentas, para no confundirlos.',
+    'Si el balance sale negativo por abonar a tus deudas, el asesor lo reconoce como algo bueno en lugar de alarmarte.',
+  ] },
   { v: '1.14.2', fecha: '2026-09-29', cambios: [
     'Fijos semanales (ej. gimnasio): ahora salen en un solo renglón con las fechas de la quincena para marcar cada una, en lugar de repetirse.',
     'Próximos pagos ya no repite lo que está en "Fijos de la quincena"; ahí se muestra "vence mañana" o "en 2 días".',

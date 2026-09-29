@@ -186,7 +186,7 @@ function totales(p) {
   // 50/30/20: el bloque "ahorro y deudas" cuenta el ahorro y lo que de verdad bajó tu deuda
   // (lo pagado menos lo que volviste a cargar a tarjetas), para no contar dos veces la misma compra
   t.A = t.ahorro + Math.max(0, t.pagos - t.conTarjeta);
-  // Dinero libre = lo que entró menos lo que salió de tus cuentas
+  // Balance del periodo = lo que entró menos lo que salió de tus cuentas
   t.salidas = t.gasto - t.conTarjeta + t.pagos + t.ahorro + Math.max(0, -t.personal);
   t.libre = t.ingreso + Math.max(0, t.personal) - t.salidas;
   return t;
@@ -446,7 +446,9 @@ function consejos(t) {
     if (t.D / ing > 0.3) add('warn', '🛍️', `Los gastos de deseos son el ${pct(t.D / ing)} del ingreso (ideal ≤ 30%). Es el rubro más fácil de recortar.`);
     // Sin contar lo que prestaste (eso regresa): ¿salió más de lo que entró?
     const deficit = -(t.libre - Math.min(0, t.personal));
-    if (deficit > 0) add('bad', '🚨', `Salió ${fmt(deficit)} más de lo que ingresó ${palabraPeriodo()}. Revisa si estás financiando el día a día con tarjeta o con tus ahorros.`);
+    // Si el faltante se debe a abonos a deudas, no es mala señal: pagaste deuda con dinero que ya tenías
+    if (deficit > 0 && t.pagos >= deficit) add('ok', '💪', `Abonaste ${fmt(t.pagos)} a tus deudas ${palabraPeriodo()}; ${fmt(deficit)} salieron de dinero que ya tenías. Bien, siempre que conserves un colchón para emergencias.`);
+    else if (deficit > 0) add('bad', '🚨', `Salió ${fmt(deficit)} más de lo que ingresó ${palabraPeriodo()}. Revisa si estás financiando el día a día con tarjeta o con tus ahorros.`);
   }
   // Presupuesto: las categorías más comprometidas primero
   const pres = estadoPresupuesto(t).filter(f => f.tope && f.uso >= 0.8);
@@ -984,7 +986,7 @@ const VISTAS = {
         <div class="kpi"><div class="lbl">Ingresos</div><div class="val c-ingreso">${fmt(t.ingreso)}</div></div>
         <div class="kpi"><div class="lbl">Gastos</div><div class="val c-gasto">${fmt(t.gasto)}</div>${t.conTarjeta ? `<div class="sub">${fmt(t.conTarjeta)} a crédito (tarjeta o meses)</div>` : ''}</div>
         <div class="kpi"><div class="lbl">Ahorro y pagos</div><div class="val c-ahorro">${fmt(t.ahorro + t.pagos)}</div>${t.pagos ? `<div class="sub">${fmt(t.pagos)} a deudas</div>` : ''}</div>
-        <div class="kpi"><div class="lbl">Dinero libre</div><div class="val" style="color:${t.libre < 0 ? 'var(--deuda)' : 'inherit'}">${fmt(t.libre)}</div><div class="sub">entró − salió de tus cuentas</div></div>
+        <div class="kpi"><div class="lbl">Balance ${esMes() ? 'del mes' : 'de la quincena'}</div><div class="val" style="color:${t.libre < 0 ? 'var(--deuda)' : 'inherit'}">${t.libre > 0 ? '+' : ''}${fmt(t.libre)}</div><div class="sub">lo que entró − lo que salió.<br>Tienes <b>${fmt(totalCuentas())}</b> en tus cuentas</div></div>
       </div>
 
       ${htmlProximosPagos()}
@@ -1235,7 +1237,7 @@ function htmlReportes() {
   // Este mes vs. el anterior (siempre por mes calendario)
   const mAct = hoyISO().slice(0, 7), mAnt = sumarMeses(mAct, -1);
   const a = totales(mAct), b = totales(mAnt);
-  const filasComp = [['Ingresos', 'ingreso', true], ['Gastos', 'gasto', false], ['Ahorro y pagos', null, true], ['Dinero libre', 'libre', true]]
+  const filasComp = [['Ingresos', 'ingreso', true], ['Gastos', 'gasto', false], ['Ahorro y pagos', null, true], ['Balance', 'libre', true]]
     .map(([n, k, bueno]) => { const va = k ? a[k] : a.ahorro + a.pagos, vb = k ? b[k] : b.ahorro + b.pagos;
       return `<tr><td>${n}</td><td class="n">${fmt(vb)}</td><td class="n"><b>${fmt(va)}</b></td><td class="n">${flecha(va, vb, bueno)}</td></tr>`; }).join('');
   const cats = [...new Set([...Object.keys(a.porCat), ...Object.keys(b.porCat)])]
