@@ -168,14 +168,19 @@ function promedioGastoMensual() {
 function compromisos(p) {
   return quincenasDe(p).map(q => {
     const r = rango(q);
-    const n = +q.slice(-1);
     // Los semanales generan una ocurrencia por cada vez que su día cae en la quincena (2 o 3)
+    // clave: identifica cada ocurrencia (fecha si es semanal, quincena si no) para poder omitirla sola
     const fijos = [];
+    const ultimo = diasDelMes(q.slice(0, 7));
     for (const f of S.fijos) {
+      const omit = f.omitidos || [];
       if (f.cuando === 'semanal') {
-        for (const fecha of fechasDiaSemana(r, f.diaSemana)) fijos.push({ f, fecha, mov: S.movs.find(x => x.fijoId === f.id && x.ocurrencia === fecha) });
-      } else if (f.cuando === 'cada' || f.cuando === 'q' + n) {
-        fijos.push({ f, fecha: null, mov: S.movs.find(x => x.fijoId === f.id && !x.ocurrencia && enRango(x.fecha, r)) });
+        for (const fecha of fechasDiaSemana(r, f.diaSemana)) {
+          if (!omit.includes(fecha)) fijos.push({ f, fecha, clave: fecha, mov: S.movs.find(x => x.fijoId === f.id && x.ocurrencia === fecha) });
+        }
+      } else {
+        const toca = f.cuando === 'cada' || (() => { const d = Math.min(diaMensual(f), ultimo); return d >= +r[0].slice(8) && d <= +r[1].slice(8); })();
+        if (toca && !omit.includes(q)) fijos.push({ f, fecha: null, clave: q, mov: S.movs.find(x => x.fijoId === f.id && !x.ocurrencia && enRango(x.fecha, r)) });
       }
     }
     const orden = x => x.fecha ? +x.fecha.slice(8, 10) : (x.f.dia || 99);
@@ -205,7 +210,10 @@ function fechasDiaSemana([ini, fin], dow) {
   return out;
 }
 const DIAS = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
-const cuandoTexto = f => f.cuando === 'semanal' ? `cada ${DIAS[f.diaSemana]}` : f.dia ? `día ${f.dia}` : '';
+// Día del mes de un fijo mensual (el formato anterior q1/q2 sin día cae al inicio de su quincena)
+const diaMensual = f => f.dia || (f.cuando === 'q2' ? 16 : 1);
+const cuandoTexto = f => f.cuando === 'semanal' ? `cada ${DIAS[f.diaSemana]}`
+  : f.cuando === 'cada' ? 'cada quincena' : `mensual · día ${diaMensual(f)}`;
 // Fecha en que se registra un fijo: su día si cae en la quincena; si no, hoy (si aplica) o el inicio
 function fechaFijo(f, r) {
   const ym = r[0].slice(0, 7);
@@ -345,14 +353,14 @@ function htmlCompromisos(pend, proyectado) {
 
   let nPend = 0;
   const cuerpo = bloques.map(b => {
-    const items = b.fijos.map(({ f, fecha, mov }) => {
+    const items = b.fijos.map(({ f, fecha, clave, mov }) => {
       if (!mov) nPend++;
       const ing = f.tipo === 'ingreso';
       return `<li class="${mov ? 'hecho' : ''}">
         <button class="check-btn ${mov ? 'on' : ''}" data-action="marcar-fijo" data-id="${f.id}" data-q="${b.q}" data-fecha="${fecha || ''}" aria-label="${mov ? 'Desmarcar' : 'Marcar como ' + (ing ? 'recibido' : 'pagado')}">${mov ? '✓' : ''}</button>
         <div class="info"><b>${esc(f.nombre)}${fecha ? ` <span class="badge sem">${DIAS[f.diaSemana].slice(0, 3)} ${+fecha.slice(8, 10)}</span>` : ''}</b><span class="muted small">${ing ? 'Ingreso' : esc(f.cat)}${cuandoTexto(f) ? ' · ' + cuandoTexto(f) : ''}${mov ? ` · ${ing ? 'recibido' : 'pagado'} ${fechaCorta(mov.fecha)}` : ''}</span></div>
         <span class="monto ${ing ? 'c-ingreso' : 'c-gasto'}">${ing ? '+' : '−'} ${fmt(mov ? mov.monto : f.monto)}</span>
-        <button class="link-btn" data-action="editar-fijo" data-id="${f.id}" aria-label="Editar fijo">✏️</button>
+        <button class="link-btn" data-action="editar-fijo" data-id="${f.id}" data-clave="${clave}" data-etiqueta="${fecha ? fechaCorta(fecha).slice(0, -5) : nombrePeriodo(clave, true)}" data-pagado="${mov ? 1 : 0}" aria-label="Editar fijo">✏️</button>
       </li>`;
     }).concat(b.tarjetas.map(({ d, pagado }) => `<li class="${pagado ? 'hecho' : ''}">
         <button class="check-btn ${pagado ? 'on' : ''}" data-action="pagar-deuda" data-id="${d.id}" aria-label="Registrar pago de ${esc(d.nombre)}" ${pagado ? 'disabled' : ''}>${pagado ? '✓' : ''}</button>
@@ -713,9 +721,12 @@ function formMov(mov) {
   $$('#dlg-body input[name=tipo]').forEach(r => r.onchange = () => { $('#sel-cat').innerHTML = opciones(catsDe(r.value)); });
 }
 
-function formFijo(fijo) {
-  const f = fijo || { tipo: 'gasto', nombre: '', monto: '', cat: 'Vivienda', cuando: 'cada', dia: '', diaSemana: 6 };
-  const semanal = f.cuando === 'semanal';
+// occ: la fecha concreta desde la que se abrió (para "Quitar solo esta vez")
+function formFijo(fijo, occ) {
+  const f = fijo ? { ...fijo } : { tipo: 'gasto', nombre: '', monto: '', cat: 'Vivienda', cuando: 'mensual', dia: '', diaSemana: 6 };
+  if (f.cuando === 'q1' || f.cuando === 'q2') { f.dia = diaMensual(f); f.cuando = 'mensual'; } // formato anterior
+  const semanal = f.cuando === 'semanal', mensual = f.cuando === 'mensual';
+  const puedeOmitir = fijo && occ && !occ.pagado;
   const catsGasto = CATS.gasto.map(c => c[0]).filter(c => c !== 'Pago de deuda');
   dialogo(fijo ? 'Editar fijo' : 'Nuevo gasto o ingreso fijo', `
     <div class="segmento">
@@ -724,34 +735,38 @@ function formFijo(fijo) {
     </div>
     ${campo('Nombre', `name="nombre" required maxlength="40" value="${esc(f.nombre)}" placeholder="Ej. Renta, súper, gasolina, sueldo…"`)}
     <label class="campo">¿Cada cuándo?<select name="cuando">
-      <option value="semanal" ${semanal ? 'selected' : ''}>Cada semana</option>
+      <option value="mensual" ${mensual ? 'selected' : ''}>Una vez al mes</option>
       <option value="cada" ${f.cuando === 'cada' ? 'selected' : ''}>Cada quincena (2 veces al mes)</option>
-      <option value="q1" ${f.cuando === 'q1' ? 'selected' : ''}>Solo en la 1ª quincena (1 al 15)</option>
-      <option value="q2" ${f.cuando === 'q2' ? 'selected' : ''}>Solo en la 2ª quincena (16 a fin de mes)</option>
+      <option value="semanal" ${semanal ? 'selected' : ''}>Cada semana</option>
     </select></label>
     <div class="grid2">
       ${campo('Monto', `name="monto" type="number" inputmode="decimal" step="0.01" min="0.01" required value="${f.monto}"`, 'Si varía, pon un aproximado')}
-      <div id="campo-dia" ${semanal ? 'hidden' : ''}>${campo('Día aprox.', `name="dia" type="number" min="1" max="31" value="${f.dia || ''}"`, 'Opcional')}</div>
+      <div id="campo-dia" ${mensual ? '' : 'hidden'}>${campo('Día del mes', `name="dia" type="number" min="1" max="31" value="${f.dia || ''}" ${mensual ? 'required' : ''}`, 'Define en qué quincena cae')}</div>
       <label class="campo" id="campo-dsem" ${semanal ? '' : 'hidden'}>Día de la semana<select name="diaSemana">${DIAS.map((n, i) => `<option value="${i}" ${+f.diaSemana === i ? 'selected' : ''}>${n[0].toUpperCase() + n.slice(1)}</option>`).join('')}</select></label>
     </div>
     <p class="hint" id="hint-sem" ${semanal ? '' : 'hidden'} style="margin:-4px 0 12px">Cada quincena trae 2 o 3 veces ese día; la app las pone todas en la lista.</p>
     <label class="campo" id="campo-cat" ${f.tipo === 'ingreso' ? 'hidden' : ''}>Categoría<select name="cat">${opciones(catsGasto, f.cat)}</select></label>
-    ${fijo ? `<button type="button" class="btn mini peligro" data-action="borrar-fijo" data-id="${fijo.id}">Eliminar fijo</button>` : ''}
+    ${fijo ? `<div class="acciones">
+      ${puedeOmitir ? `<button type="button" class="btn mini sec" data-action="omitir-fijo" data-id="${fijo.id}" data-clave="${occ.clave}">Quitar solo esta vez (${occ.etiqueta})</button>` : ''}
+      <button type="button" class="btn mini peligro" data-action="borrar-fijo" data-id="${fijo.id}">Eliminar para siempre</button>
+    </div>` : ''}
   `, d => {
     const monto = num(d.monto);
     if (monto <= 0) return toast('Ingresa un monto válido'), false;
-    const dia = d.cuando === 'semanal' ? null : parseInt(d.dia) || null;
-    // Si eligió un día, que la quincena sea coherente con él
-    let cuando = d.cuando;
-    if (dia && (cuando === 'q1' || cuando === 'q2')) cuando = dia <= 15 ? 'q1' : 'q2';
+    const cuando = d.cuando;
+    const dia = cuando === 'mensual' ? parseInt(d.dia) || null : null;
+    if (cuando === 'mensual' && !dia) return toast('Indica el día del mes'), false;
     const datos = { tipo: d.tipo, nombre: d.nombre.trim(), monto, cat: d.tipo === 'ingreso' ? 'Sueldo' : d.cat, cuando, dia, diaSemana: cuando === 'semanal' ? +d.diaSemana : null };
-    if (fijo) Object.assign(fijo, datos); else S.fijos.push({ id: uid(), ...datos });
+    if (fijo) Object.assign(fijo, datos); else S.fijos.push({ id: uid(), ...datos, omitidos: [] });
     toast('📌 Fijo guardado');
   });
   $$('#dlg-body input[name=tipo]').forEach(r => r.onchange = () => { $('#campo-cat').hidden = r.value === 'ingreso'; });
-  const dia = $('#dlg-body input[name=dia]'), sel = $('#dlg-body select[name=cuando]');
-  dia.oninput = () => { const v = parseInt(dia.value); if (v && (sel.value === 'q1' || sel.value === 'q2')) sel.value = v <= 15 ? 'q1' : 'q2'; };
-  sel.onchange = () => { const sem = sel.value === 'semanal'; $('#campo-dia').hidden = sem; $('#campo-dsem').hidden = !sem; $('#hint-sem').hidden = !sem; };
+  const sel = $('#dlg-body select[name=cuando]'), dia = $('#dlg-body input[name=dia]');
+  sel.onchange = () => {
+    const v = sel.value;
+    $('#campo-dia').hidden = v !== 'mensual'; dia.required = v === 'mensual';
+    $('#campo-dsem').hidden = v !== 'semanal'; $('#hint-sem').hidden = v !== 'semanal';
+  };
 }
 
 function marcarFijo(f, q, fecha) {
@@ -929,11 +944,20 @@ const ACCIONES = {
   'mes-next': () => cambiarMes(1),
   'per-hoy': () => { per = periodoDe(hoyISO()); render(); },
   'nuevo-fijo': () => formFijo(),
-  'editar-fijo': el => formFijo(buscarId(S.fijos, el.dataset.id)),
+  'editar-fijo': el => {
+    const { clave, etiqueta, pagado } = el.dataset;
+    formFijo(buscarId(S.fijos, el.dataset.id), clave ? { clave, etiqueta, pagado: pagado === '1' } : null);
+  },
+  'omitir-fijo': el => {
+    const f = buscarId(S.fijos, el.dataset.id);
+    (f.omitidos ||= []).push(el.dataset.clave);
+    $('#dlg').close(); guardar(); render();
+    toast(`${f.nombre}: quitado solo de esta fecha`);
+  },
   'borrar-fijo': el => {
     const f = buscarId(S.fijos, el.dataset.id);
     $('#dlg').close();
-    confirmar('Eliminar fijo', `¿Eliminar <b>${esc(f.nombre)}</b>? Los movimientos que ya registraste se conservan.`, () => {
+    confirmar('Eliminar fijo', `¿Eliminar <b>${esc(f.nombre)}</b> de <b>todas</b> las quincenas? Los pagos que ya registraste se conservan.<br><span class="small muted">Si solo quieres quitarlo una vez, usa "Quitar solo esta vez".</span>`, () => {
       S.fijos = S.fijos.filter(x => x !== f);
       S.movs.forEach(m => { if (m.fijoId === f.id) delete m.fijoId; });
     });
