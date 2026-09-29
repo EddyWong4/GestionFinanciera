@@ -1,8 +1,15 @@
 // Versión de la app. Súbela en cada cambio publicado: la usan app.js (pantalla y avisos)
 // y sw.js (nombre de la caché, para que la app instalada descargue la versión nueva).
-const VERSION = '1.5.0';
+const VERSION = '1.6.0';
 
 const NOVEDADES = [
+  { v: '1.6.0', fecha: '2026-09-29', cambios: [
+    'Mis cuentas: efectivo, débito/nómina y ahorro, con su saldo real. Ajústalo con ✏️ para que coincida con tu banco.',
+    'Cada gasto dice con qué se pagó: una cuenta o una tarjeta de crédito.',
+    'Las compras con tarjeta suben el saldo de la tarjeta y no descuentan de tus cuentas; pagar la tarjeta ya no se cuenta como otro gasto (antes se contaba doble).',
+    'Traspasos entre cuentas (ej. sacar efectivo del cajero).',
+    '"Dinero libre" ahora es lo que entró menos lo que salió de tus cuentas.',
+  ] },
   { v: '1.5.0', fecha: '2026-09-29', cambios: [
     'Compras a meses: sin intereses (MSI) o con intereses, en Deudas → Compras a meses.',
     'Cada mensualidad aparece en la quincena en que vence para marcarla como pagada.',

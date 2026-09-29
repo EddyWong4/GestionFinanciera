@@ -27,24 +27,43 @@ const CATS = {
     ['Vivienda', 'N'], ['Servicios (luz, agua, gas, internet)', 'N'], ['Súper y despensa', 'N'],
     ['Transporte / gasolina', 'N'], ['Salud', 'N'], ['Educación', 'N'], ['Seguros', 'N'],
     ['Restaurantes y comida fuera', 'D'], ['Entretenimiento', 'D'], ['Ropa y calzado', 'D'],
-    ['Suscripciones', 'D'], ['Regalos', 'D'], ['Otros gastos', 'D'], ['Pago de deuda', 'A'],
+    ['Suscripciones', 'D'], ['Regalos', 'D'], ['Otros gastos', 'D'], ['Intereses y comisiones', 'D'], ['Pago de deuda', 'A'],
   ],
 };
 const GRUPO = Object.fromEntries(CATS.gasto);
+const CATS_GASTO = CATS.gasto.map(c => c[0]).filter(c => c !== 'Pago de deuda');
+const TIPOS_CUENTA = { debito: 'Débito / nómina', efectivo: 'Efectivo', ahorro: 'Cuenta de ahorro / inversión' };
+const ICON_CUENTA = { debito: '🏦', efectivo: '💵', ahorro: '🏛️' };
 const TIPOS_DEUDA = { tc: 'Tarjeta de crédito', dep: 'Tienda departamental', prestamo: 'Préstamo personal', otra: 'Otra' };
 const IVA = 1.16; // En México el IVA se cobra sobre los intereses de tarjetas
 
 /* ---------- Estado ---------- */
 const estadoVacio = () => ({
   version: 1,
-  movs: [],     // {id, tipo:'ingreso'|'gasto'|'ahorro', monto, cat, fecha, nota, metaId?, deudaId?, histId?}
+  // Movimientos: tipo 'ingreso' | 'gasto' (consumo) | 'ahorro' | 'pago' (a una deuda) | 'traspaso' (entre cuentas).
+  // Medio: cuentaId (sale/entra de una cuenta) o tarjetaId (gasto con tarjeta de crédito: no toca tus cuentas).
+  movs: [],     // {id, tipo, monto, cat, fecha, nota, cuentaId?, tarjetaId?, destinoId?, metaId?, deudaId?, histId?, msiId?, pagoId?, msiCompraId?}
+  cuentas: [],  // {id, nombre, tipo:'debito'|'efectivo'|'ahorro', saldoInicial}
   metas: [],    // {id, nombre, objetivo, inicial, fechaMeta?}
   deudas: [],   // {id, nombre, tipo, saldoInicial, tasa, minimo, limite, diaCorte, diaPago, hist:[{id,fecha,tipo,monto}]}
   msi: [],      // compras a meses {id, nombre, tarjetaId?, monto, meses, tasa (0 = MSI), primerMes:'YYYY-MM', diaPago, inicial, pagos:[{id,fecha,mes,monto}]}
   fijos: [],    // {id, tipo:'gasto'|'ingreso', nombre, monto, cat, cuando:'cada'|'q1'|'q2'|'semanal', dia?, diaSemana?}
-  ajustes: { iva: true, estrategia: 'avalancha', presupuestoDeuda: 0, ultimoExport: null, modo: 'quincena' },
+  ajustes: { iva: true, estrategia: 'avalancha', presupuestoDeuda: 0, ultimoExport: null, modo: 'quincena', ultimoMedio: null, cuentasRevisadas: false },
 });
-let S = estadoVacio();
+
+// Adapta datos de versiones anteriores al modelo de cuentas
+function migrar(st) {
+  if (!Array.isArray(st.cuentas)) st.cuentas = [];
+  if (!st.cuentas.length) st.cuentas.push({ id: 'principal', nombre: 'Efectivo y débito', tipo: 'debito', saldoInicial: 0 });
+  const def = st.cuentas[0].id;
+  for (const m of st.movs) {
+    // Antes el pago de una deuda se guardaba como gasto: ahora es un pago (no es consumo nuevo)
+    if (m.tipo === 'gasto' && m.cat === 'Pago de deuda') m.tipo = 'pago';
+    if (!m.cuentaId && !m.tarjetaId && !m.msiCompraId && m.tipo !== 'traspaso') m.cuentaId = def;
+  }
+  return st;
+}
+let S = migrar(estadoVacio());
 let vista = 'resumen';
 let filtroMov = 'todos';
 
@@ -136,21 +155,79 @@ async function podarRespaldos() {
 
 /* ---------- Cálculos ---------- */
 const movsPer = p => { const r = rango(p); return S.movs.filter(x => enRango(x.fecha, r)); };
+// Compras con tarjeta o a meses: son gasto (consumo) pero no sacan dinero de tus cuentas hoy
+const esCredito = m => !!(m.tarjetaId || m.msiCompraId);
 function totales(p) {
-  const t = { ingreso: 0, gasto: 0, ahorro: 0, N: 0, D: 0, A: 0, deuda: 0, porCat: {} };
+  const t = { ingreso: 0, gasto: 0, conTarjeta: 0, pagos: 0, ahorro: 0, N: 0, D: 0, A: 0, porCat: {} };
   for (const x of movsPer(p)) {
     if (x.tipo === 'ingreso') t.ingreso += x.monto;
-    else if (x.tipo === 'ahorro') { t.ahorro += x.monto; t.A += x.monto; }
-    else {
+    else if (x.tipo === 'ahorro') t.ahorro += x.monto;
+    else if (x.tipo === 'pago') t.pagos += x.monto;
+    else if (x.tipo === 'gasto') {
       t.gasto += x.monto;
-      const g = GRUPO[x.cat] || 'D';
-      t[g] += x.monto;
-      if (x.cat === 'Pago de deuda') t.deuda += x.monto;
+      if (esCredito(x)) t.conTarjeta += x.monto;
+      t[GRUPO[x.cat] || 'D'] += x.monto;
       t.porCat[x.cat] = (t.porCat[x.cat] || 0) + x.monto;
     }
   }
-  t.libre = t.ingreso - t.gasto - t.ahorro;
+  // 50/30/20: el bloque "ahorro y deudas" cuenta el ahorro y lo que de verdad bajó tu deuda
+  // (lo pagado menos lo que volviste a cargar a tarjetas), para no contar dos veces la misma compra
+  t.A = t.ahorro + Math.max(0, t.pagos - t.conTarjeta);
+  // Dinero libre = lo que entró menos lo que salió de tus cuentas
+  t.salidas = t.gasto - t.conTarjeta + t.pagos + t.ahorro;
+  t.libre = t.ingreso - t.salidas;
   return t;
+}
+
+/* ---------- Cuentas y medio de pago ---------- */
+const cuentaDefault = () => S.cuentas[0]?.id;
+function flujoCuenta(id) {
+  let s = 0;
+  for (const m of S.movs) {
+    if (m.tipo === 'traspaso') { if (m.cuentaId === id) s -= m.monto; if (m.destinoId === id) s += m.monto; continue; }
+    if (m.cuentaId === id) s += m.tipo === 'ingreso' ? m.monto : -m.monto; // un retiro de ahorro (negativo) regresa a la cuenta
+  }
+  return s;
+}
+const saldoCuenta = c => c.saldoInicial + flujoCuenta(c.id);
+const totalCuentas = () => S.cuentas.reduce((a, c) => a + saldoCuenta(c), 0);
+const tarjetasCredito = () => S.deudas.filter(d => d.tipo === 'tc' || d.tipo === 'dep');
+// Valor de un <select> de medio: 'c:<cuenta>' o 't:<tarjeta>'
+const medioValido = v => { if (!v) return false; const [k, id] = v.split(':'); return k === 't' ? S.deudas.some(d => d.id === id) : S.cuentas.some(c => c.id === id); };
+const medioDe = m => m.tarjetaId ? 't:' + m.tarjetaId : 'c:' + (m.cuentaId || cuentaDefault());
+const medioDefault = (soloCuentas = false) => {
+  const u = S.ajustes.ultimoMedio;
+  return medioValido(u) && !(soloCuentas && u.startsWith('t:')) ? u : 'c:' + cuentaDefault();
+};
+function opcionesMedio(sel, conTarjetas = true) {
+  const cs = S.cuentas.map(c => `<option value="c:${c.id}" ${sel === 'c:' + c.id ? 'selected' : ''}>${ICON_CUENTA[c.tipo]} ${esc(c.nombre)}</option>`).join('');
+  const ts = conTarjetas ? tarjetasCredito().map(d => `<option value="t:${d.id}" ${sel === 't:' + d.id ? 'selected' : ''}>💳 ${esc(d.nombre)} (crédito)</option>`).join('') : '';
+  return ts ? `<optgroup label="Mis cuentas">${cs}</optgroup><optgroup label="Tarjetas de crédito">${ts}</optgroup>` : cs;
+}
+function aplicarMedio(m, v) {
+  delete m.cuentaId; delete m.tarjetaId;
+  const [k, id] = (medioValido(v) ? v : 'c:' + cuentaDefault()).split(':');
+  if (k === 't' && m.tipo === 'gasto') m.tarjetaId = id; else m.cuentaId = k === 'c' ? id : cuentaDefault();
+}
+function nombreMedio(m) {
+  if (m.tarjetaId) return '💳 ' + (S.deudas.find(d => d.id === m.tarjetaId)?.nombre || 'Tarjeta');
+  if (m.msiCompraId) return '🛍️ A meses';
+  const c = S.cuentas.find(c => c.id === m.cuentaId);
+  return c ? `${ICON_CUENTA[c.tipo]} ${c.nombre}` : '';
+}
+// Un gasto con tarjeta sube el saldo de esa tarjeta: se refleja como cargo ligado al movimiento
+function syncCargo(m) {
+  for (const d of S.deudas) d.hist = d.hist.filter(h => h.movId !== m.id);
+  if (m.tipo === 'gasto' && m.tarjetaId) {
+    const d = S.deudas.find(d => d.id === m.tarjetaId);
+    if (d) d.hist.push({ id: uid(), fecha: m.fecha, tipo: 'cargo', monto: m.monto, movId: m.id });
+  }
+}
+// Quita un movimiento y todo lo que depende de él (cargo en tarjeta, pago de deuda o mensualidad)
+function quitarMov(m) {
+  for (const d of S.deudas) d.hist = d.hist.filter(h => h.movId !== m.id && !(m.histId && h.id === m.histId));
+  if (m.msiId) { const c = S.msi.find(c => c.id === m.msiId); if (c) c.pagos = c.pagos.filter(p => p.id !== m.pagoId); }
+  S.movs = S.movs.filter(x => x !== m);
 }
 const acumuladoMeta = mt => mt.inicial + S.movs.filter(x => x.metaId === mt.id).reduce((a, x) => a + x.monto, 0);
 const saldoDeuda = d => Math.max(0, d.saldoInicial + d.hist.reduce((a, h) => a + (h.tipo === 'pago' ? -h.monto : h.monto), 0));
@@ -181,7 +258,7 @@ const msiDeTarjeta = d => msiActivas().filter(c => c.tarjetaId === d.id);
 function pagarMSI(c, ym, fecha) {
   const p = { id: uid(), fecha, mes: ym, monto: Math.round(mensualidad(c) * 100) / 100 };
   c.pagos.push(p);
-  S.movs.push({ id: uid(), tipo: 'gasto', monto: p.monto, cat: 'Pago de deuda', fecha, nota: `${c.nombre} (${mesesEntre(c.primerMes, ym) + 1}/${c.meses})`, msiId: c.id, pagoId: p.id });
+  S.movs.push({ id: uid(), tipo: 'pago', monto: p.monto, cat: 'Pago de deuda', fecha, nota: `${c.nombre} (${mesesEntre(c.primerMes, ym) + 1}/${c.meses})`, msiId: c.id, pagoId: p.id, cuentaId: medioDefault(true).slice(2) });
 }
 function quitarPagoMSI(c, ym) {
   const p = c.pagos.find(x => x.mes === ym);
@@ -197,10 +274,10 @@ function promedioIngresoMensual() {
 }
 
 function promedioGastoMensual() {
-  // Promedio de gastos (sin pagos de deuda) de los últimos 3 meses con registros
+  // Promedio de gastos (consumo, sin pagos de deuda) de los últimos 3 meses con registros
   const meses = [...new Set(S.movs.map(x => mesDe(x.fecha)))].sort().reverse().slice(0, 3);
   if (!meses.length) return 0;
-  return meses.reduce((a, m) => { const t = totales(m); return a + t.gasto - t.deuda; }, 0) / meses.length;
+  return meses.reduce((a, m) => a + totales(m).gasto, 0) / meses.length;
 }
 
 // Fijos (y tarjetas por vencer) que tocan en cada quincena del periodo, con su estado de pago
@@ -341,6 +418,8 @@ function consejos(t) {
     if (t.D / ing > 0.3) add('warn', '🛍️', `Los gastos de deseos son el ${pct(t.D / ing)} del ingreso (ideal ≤ 30%). Es el rubro más fácil de recortar.`);
     if (t.libre < 0) add('bad', '🚨', `Gastaste ${fmt(-t.libre)} más de lo que ingresó ${palabraPeriodo()}. Revisa si estás financiando el día a día con tarjeta.`);
   }
+  for (const c of S.cuentas) if (saldoCuenta(c) < -0.5) add('bad', '🏦', `Tu cuenta <b>${esc(c.nombre)}</b> está en ${fmt(saldoCuenta(c))}. Revisa si falta registrar un ingreso o ajusta su saldo real (✏️ en "Mis cuentas").`);
+  if (t.gasto > 0 && t.conTarjeta / t.gasto > 0.5) add('warn', '💳', `Pagaste con tarjeta el ${pct(t.conTarjeta / t.gasto)} de tus gastos de ${palabraPeriodo()} (${fmt(t.conTarjeta)}). Asegúrate de apartar ese dinero para pagar la tarjeta completa y no generar intereses.`);
   const pend = pendientes(per);
   const proyectado = t.libre + pend.ingreso - pend.gasto - pend.tarjetas;
   if (pend.gasto + pend.tarjetas > 0 && proyectado < 0) add('bad', '📌', `Tus pendientes de ${palabraPeriodo()} (${fmt(pend.gasto + pend.tarjetas)}) superan lo que te queda. Te faltarían ${fmt(-proyectado)}: pospón gastos de "deseos" hasta cubrir los fijos.`);
@@ -395,6 +474,26 @@ function render() {
   $('.fab').style.display = vista === 'ajustes' ? 'none' : '';
   $$('.tabbar button').forEach(b => b.classList.toggle('activo', b.dataset.tab === vista));
   $('#vista').innerHTML = VISTAS[vista]();
+}
+
+function htmlCuentas() {
+  const total = totalCuentas();
+  return `<section class="card">
+    <div class="row"><h2 style="margin:0">💰 Mis cuentas</h2>
+      <div class="acciones" style="margin:0">
+        ${S.cuentas.length > 1 ? '<button class="btn mini sec" data-action="traspaso">↔ Traspaso</button>' : ''}
+        <button class="btn mini sec" data-action="nueva-cuenta">+ Cuenta</button>
+      </div></div>
+    <ul class="lista">${S.cuentas.map(c => {
+      const s = saldoCuenta(c);
+      return `<li><span style="font-size:1.3rem">${ICON_CUENTA[c.tipo]}</span>
+        <div class="info"><b>${esc(c.nombre)}</b><span class="muted small">${TIPOS_CUENTA[c.tipo]}</span></div>
+        <span class="monto ${s < 0 ? 'c-deuda' : ''}">${fmt(s)}</span>
+        <button class="link-btn" data-action="editar-cuenta" data-id="${c.id}" aria-label="Editar o ajustar saldo">✏️</button></li>`;
+    }).join('')}</ul>
+    ${S.cuentas.length > 1 ? `<div class="resumen-fijos"><div class="row"><b>Total en cuentas</b><b>${fmt(total)}</b></div></div>` : ''}
+    ${S.ajustes.cuentasRevisadas ? '' : `<div class="tip info"><span class="ic">🏦</span><div>Toca ✏️ y pon el <b>saldo real</b> que tienes hoy en tu banco o cartera. Desde ahí la app lleva la cuenta sola: cada ingreso, gasto y pago mueve el saldo. Si tienes varias (nómina, efectivo, ahorro), agrégalas con "+ Cuenta".</div></div>`}
+  </section>`;
 }
 
 function htmlCompromisos(pend, proyectado) {
@@ -457,7 +556,7 @@ const VISTAS = {
     // Tendencia de los últimos 6 periodos
     const ult = Array.from({ length: 6 }, (_, i) => moverPeriodo(per, i - 5));
     const tots = ult.map(totales);
-    const maxT = Math.max(1, ...tots.flatMap(x => [x.ingreso, x.gasto + x.ahorro]));
+    const maxT = Math.max(1, ...tots.flatMap(x => [x.ingreso, x.salidas]));
 
     const regla = [
       ['Necesidades', t.N, 0.5, 'var(--gasto)'],
@@ -468,10 +567,12 @@ const VISTAS = {
     return `
       <div class="kpis">
         <div class="kpi"><div class="lbl">Ingresos</div><div class="val c-ingreso">${fmt(t.ingreso)}</div></div>
-        <div class="kpi"><div class="lbl">Gastos</div><div class="val c-gasto">${fmt(t.gasto)}</div></div>
-        <div class="kpi"><div class="lbl">Ahorrado</div><div class="val c-ahorro">${fmt(t.ahorro)}</div></div>
-        <div class="kpi"><div class="lbl">Disponible hoy</div><div class="val" style="color:${t.libre < 0 ? 'var(--deuda)' : 'inherit'}">${fmt(t.libre)}</div></div>
+        <div class="kpi"><div class="lbl">Gastos</div><div class="val c-gasto">${fmt(t.gasto)}</div>${t.conTarjeta ? `<div class="sub">${fmt(t.conTarjeta)} a crédito (tarjeta o meses)</div>` : ''}</div>
+        <div class="kpi"><div class="lbl">Ahorro y pagos</div><div class="val c-ahorro">${fmt(t.ahorro + t.pagos)}</div>${t.pagos ? `<div class="sub">${fmt(t.pagos)} a deudas</div>` : ''}</div>
+        <div class="kpi"><div class="lbl">Dinero libre</div><div class="val" style="color:${t.libre < 0 ? 'var(--deuda)' : 'inherit'}">${fmt(t.libre)}</div><div class="sub">entró − salió de tus cuentas</div></div>
       </div>
+
+      ${htmlCuentas()}
 
       ${htmlCompromisos(pend, proyectado)}
 
@@ -498,12 +599,12 @@ const VISTAS = {
           ${tots.map((x, i) => `<div class="col">
             <div class="pair">
               <span style="height:${x.ingreso / maxT * 100}%;background:var(--ingreso)" title="Ingresos ${fmt(x.ingreso)}"></span>
-              <span style="height:${(x.gasto + x.ahorro) / maxT * 100}%;background:var(--gasto)" title="Egresos ${fmt(x.gasto + x.ahorro)}"></span>
+              <span style="height:${x.salidas / maxT * 100}%;background:var(--gasto)" title="Salidas ${fmt(x.salidas)}"></span>
             </div>
             <div class="lbl">${nombrePeriodo(ult[i], true)}</div>
           </div>`).join('')}
         </div>
-        <div class="leyenda"><span><i style="background:var(--ingreso)"></i>Ingresos</span><span><i style="background:var(--gasto)"></i>Gastos + ahorro</span></div>
+        <div class="leyenda"><span><i style="background:var(--ingreso)"></i>Ingresos</span><span><i style="background:var(--gasto)"></i>Salidas de tus cuentas</span></div>
       </section>
 
       <section class="card">
@@ -526,7 +627,7 @@ const VISTAS = {
     let lista = movsPer(per);
     if (filtroMov !== 'todos') lista = lista.filter(x => x.tipo === filtroMov);
     lista.sort((a, b) => b.fecha.localeCompare(a.fecha) || b.id.localeCompare(a.id));
-    const chips = [['todos', 'Todos'], ['ingreso', 'Ingresos'], ['gasto', 'Gastos'], ['ahorro', 'Ahorro']]
+    const chips = [['todos', 'Todos'], ['ingreso', 'Ingresos'], ['gasto', 'Gastos'], ['pago', 'Pagos'], ['ahorro', 'Ahorro']]
       .map(([k, n]) => `<button class="chip ${filtroMov === k ? 'on' : ''}" data-action="filtro" data-v="${k}">${n}</button>`).join('');
     if (!lista.length) return `<div class="chips">${chips}</div><div class="card vacio"><div class="big">🧾</div><p>No hay movimientos en la ${nombrePeriodo(per)}.</p><button class="btn" data-action="nuevo-mov">Registrar el primero</button></div>`;
 
@@ -534,14 +635,19 @@ const VISTAS = {
     let dia = '';
     for (const x of lista) {
       if (x.fecha !== dia) { if (dia) html += '</ul>'; dia = x.fecha; html += `<p class="dia">${fechaCorta(dia)}</p><ul class="lista">`; }
-      const signo = x.tipo === 'ingreso' ? '+' : x.tipo === 'ahorro' ? (x.monto < 0 ? '↩' : '→') : '−';
-      const color = x.tipo === 'ingreso' ? 'c-ingreso' : x.tipo === 'ahorro' ? 'c-ahorro' : 'c-gasto';
-      const ic = x.tipo === 'ingreso' ? '💰' : x.tipo === 'ahorro' ? '🐷' : x.cat === 'Pago de deuda' ? '💳' : x.fijoId ? '📌' : '🛒';
+      const traspaso = x.tipo === 'traspaso';
+      const signo = x.tipo === 'ingreso' ? '+' : x.tipo === 'ahorro' ? (x.monto < 0 ? '↩' : '→') : traspaso ? '↔' : '−';
+      const color = x.tipo === 'ingreso' ? 'c-ingreso' : x.tipo === 'ahorro' ? 'c-ahorro' : x.tipo === 'pago' ? 'c-deuda' : traspaso ? '' : 'c-gasto';
+      const ic = x.tipo === 'ingreso' ? '💰' : x.tipo === 'ahorro' ? '🐷' : x.tipo === 'pago' ? '💳' : traspaso ? '🔁' : x.fijoId ? '📌' : '🛒';
+      const detalle = traspaso
+        ? `${esc(nombreMedio(x))} → ${esc(nombreMedio({ cuentaId: x.destinoId }))}`
+        : [esc(x.nota), esc(nombreMedio(x))].filter(Boolean).join(' · ');
+      const editable = (x.tipo === 'ingreso' || x.tipo === 'gasto') && !x.metaId && !x.deudaId && !x.msiId && !x.msiCompraId;
       html += `<li>
         <span style="font-size:1.3rem">${ic}</span>
-        <div class="info"><b>${esc(x.cat)}</b><span class="muted small">${esc(x.nota) || '&nbsp;'}</span></div>
+        <div class="info"><b>${esc(x.cat)}</b><span class="muted small">${detalle || '&nbsp;'}</span></div>
         <span class="monto ${color}">${signo} ${fmt(Math.abs(x.monto))}</span>
-        ${!x.metaId && !x.deudaId && !x.msiId ? `<button class="link-btn" data-action="editar-mov" data-id="${x.id}" aria-label="Editar">✏️</button>` : ''}
+        ${editable ? `<button class="link-btn" data-action="editar-mov" data-id="${x.id}" aria-label="Editar">✏️</button>` : ''}
         <button class="link-btn" data-action="borrar-mov" data-id="${x.id}" aria-label="Eliminar">🗑️</button>
       </li>`;
     }
@@ -811,7 +917,9 @@ const opciones = (lista, sel) => lista.map(v => `<option ${v === sel ? 'selected
 
 function formMov(mov) {
   const m = mov || { tipo: 'gasto', monto: '', cat: '', fecha: enRango(hoyISO(), rango(per)) ? hoyISO() : rango(per)[0], nota: '' };
-  const catsDe = t => t === 'ingreso' ? CATS.ingreso : CATS.gasto.map(c => c[0]).filter(c => c !== 'Pago de deuda');
+  const catsDe = t => t === 'ingreso' ? CATS.ingreso : CATS_GASTO;
+  const medio = mov ? medioDe(mov) : medioDefault(m.tipo === 'ingreso');
+  const lblMedio = t => t === 'ingreso' ? '¿A qué cuenta entró?' : '¿Con qué pagaste?';
   dialogo(mov ? 'Editar movimiento' : 'Nuevo movimiento', `
     <div class="segmento">
       <input type="radio" name="tipo" id="t-g" value="gasto" ${m.tipo === 'gasto' ? 'checked' : ''}><label for="t-g" class="gas">Gasto</label>
@@ -819,20 +927,76 @@ function formMov(mov) {
     </div>
     ${campo('Monto', `name="monto" type="number" inputmode="decimal" step="0.01" min="0.01" required value="${m.monto}" placeholder="0.00"`)}
     <label class="campo">Categoría<select name="cat" id="sel-cat">${opciones(catsDe(m.tipo), m.cat)}</select></label>
+    <label class="campo"><span id="lbl-medio">${lblMedio(m.tipo)}</span><select name="medio" id="sel-medio">${opcionesMedio(medio, m.tipo === 'gasto')}</select>
+      <span class="hint" id="hint-medio" ${medio.startsWith('t:') ? '' : 'hidden'}>Con tarjeta de crédito: cuenta como gasto y sube el saldo de la tarjeta, pero no descuenta de tus cuentas hasta que pagues la tarjeta.</span></label>
     <div class="grid2">
       ${campo('Fecha', `name="fecha" type="date" required value="${m.fecha}"`)}
       ${campo('Nota (opcional)', `name="nota" maxlength="80" value="${esc(m.nota)}"`)}
     </div>
-    <p class="hint">¿Ahorro o pago de tarjeta? Regístralos desde las secciones Ahorro y Deudas.</p>
+    <p class="hint">¿Ahorro, pago de tarjeta o traspaso entre cuentas? Regístralos desde Ahorro, Deudas o "Mis cuentas".</p>
   `, d => {
     const monto = num(d.monto);
     if (monto <= 0) return toast('Ingresa un monto válido'), false;
     const datos = { tipo: d.tipo, monto, cat: d.cat, fecha: d.fecha, nota: d.nota.trim() };
-    if (mov) Object.assign(mov, datos); else S.movs.push({ id: uid(), ...datos });
+    let x = mov;
+    if (x) Object.assign(x, datos); else { x = { id: uid(), ...datos }; S.movs.push(x); }
+    aplicarMedio(x, d.medio);
+    syncCargo(x);
+    if (d.tipo === 'gasto') S.ajustes.ultimoMedio = d.medio;
     per = periodoDe(d.fecha);
-    toast(mov ? 'Movimiento actualizado' : (d.tipo === 'ingreso' ? '💰 Ingreso registrado' : '🧾 Gasto registrado'));
+    toast(mov ? 'Movimiento actualizado' : (d.tipo === 'ingreso' ? '💰 Ingreso registrado' : x.tarjetaId ? '💳 Gasto con tarjeta registrado' : '🧾 Gasto registrado'));
   });
-  $$('#dlg-body input[name=tipo]').forEach(r => r.onchange = () => { $('#sel-cat').innerHTML = opciones(catsDe(r.value)); });
+  const selMedio = $('#sel-medio');
+  $$('#dlg-body input[name=tipo]').forEach(r => r.onchange = () => {
+    $('#sel-cat').innerHTML = opciones(catsDe(r.value));
+    $('#lbl-medio').textContent = lblMedio(r.value);
+    selMedio.innerHTML = opcionesMedio(r.value === 'ingreso' ? medioDefault(true) : selMedio.value, r.value === 'gasto');
+    $('#hint-medio').hidden = !selMedio.value.startsWith('t:');
+  });
+  selMedio.onchange = () => { $('#hint-medio').hidden = !selMedio.value.startsWith('t:'); };
+}
+
+function formCuenta(cuenta) {
+  const c = cuenta || { nombre: '', tipo: 'debito', saldoInicial: 0 };
+  const saldo = cuenta ? saldoCuenta(cuenta) : '';
+  const usada = cuenta && S.movs.some(m => m.cuentaId === cuenta.id || m.destinoId === cuenta.id);
+  dialogo(cuenta ? 'Editar cuenta' : 'Nueva cuenta', `
+    ${campo('Nombre', `name="nombre" required maxlength="30" value="${esc(c.nombre)}" placeholder="Ej. Nómina BBVA, Efectivo, Nu, Mercado Pago…"`)}
+    <label class="campo">Tipo<select name="tipo">${Object.entries(TIPOS_CUENTA).map(([k, v]) => `<option value="${k}" ${k === c.tipo ? 'selected' : ''}>${ICON_CUENTA[k]} ${v}</option>`).join('')}</select></label>
+    ${campo(cuenta ? 'Saldo real hoy' : 'Saldo actual', `name="saldo" type="number" inputmode="decimal" step="0.01" required value="${saldo === '' ? '' : saldo.toFixed(2)}"`,
+      cuenta ? 'Si no coincide con tu banco, escribe el saldo real y la app se ajusta.' : 'Lo que tienes hoy en esta cuenta.')}
+    ${cuenta && S.cuentas.length > 1 ? `<button type="button" class="btn mini peligro" data-action="borrar-cuenta" data-id="${cuenta.id}" ${usada ? 'disabled title="Tiene movimientos"' : ''}>Eliminar cuenta</button>
+      ${usada ? '<p class="hint">No se puede eliminar porque tiene movimientos.</p>' : ''}` : ''}
+  `, d => {
+    const nuevo = num(d.saldo);
+    const datos = { nombre: d.nombre.trim(), tipo: d.tipo };
+    if (cuenta) { Object.assign(cuenta, datos); cuenta.saldoInicial = nuevo - flujoCuenta(cuenta.id); }
+    else S.cuentas.push({ id: uid(), ...datos, saldoInicial: nuevo });
+    S.ajustes.cuentasRevisadas = true;
+    toast(cuenta ? '🏦 Saldo ajustado' : '🏦 Cuenta agregada');
+  });
+}
+
+function formTraspaso() {
+  const [a, b] = S.cuentas;
+  dialogo('Traspaso entre cuentas', `
+    <div class="grid2">
+      <label class="campo">De<select name="origen">${opcionesMedio('c:' + a.id, false)}</select></label>
+      <label class="campo">A<select name="destino">${opcionesMedio('c:' + (b?.id || a.id), false)}</select></label>
+    </div>
+    ${campo('Monto', 'name="monto" type="number" inputmode="decimal" step="0.01" min="0.01" required')}
+    <div class="grid2">
+      ${campo('Fecha', `name="fecha" type="date" required value="${hoyISO()}"`)}
+      ${campo('Nota (opcional)', 'name="nota" maxlength="80" placeholder="Ej. retiro en cajero"')}
+    </div>
+    <p class="hint">Un traspaso no es gasto ni ingreso: solo mueve dinero entre tus cuentas (ej. sacar efectivo del cajero).</p>
+  `, d => {
+    const monto = num(d.monto);
+    if (monto <= 0) return toast('Ingresa un monto válido'), false;
+    if (d.origen === d.destino) return toast('Elige dos cuentas distintas'), false;
+    S.movs.push({ id: uid(), tipo: 'traspaso', monto, cat: 'Traspaso', fecha: d.fecha, nota: d.nota.trim(), cuentaId: d.origen.slice(2), destinoId: d.destino.slice(2) });
+    toast('🔁 Traspaso registrado');
+  }, 'Registrar');
 }
 
 // occ: la fecha concreta desde la que se abrió (para "Quitar solo esta vez")
@@ -841,7 +1005,8 @@ function formFijo(fijo, occ) {
   if (f.cuando === 'q1' || f.cuando === 'q2') { f.dia = diaMensual(f); f.cuando = 'mensual'; } // formato anterior
   const semanal = f.cuando === 'semanal', mensual = f.cuando === 'mensual';
   const puedeOmitir = fijo && occ && !occ.pagado;
-  const catsGasto = CATS.gasto.map(c => c[0]).filter(c => c !== 'Pago de deuda');
+  const catsGasto = CATS_GASTO;
+  const medio = medioValido(f.medio) ? f.medio : medioDefault(f.tipo === 'ingreso');
   dialogo(fijo ? 'Editar fijo' : 'Nuevo gasto o ingreso fijo', `
     <div class="segmento">
       <input type="radio" name="tipo" id="f-g" value="gasto" ${f.tipo === 'gasto' ? 'checked' : ''}><label for="f-g" class="gas">Gasto fijo</label>
@@ -860,6 +1025,7 @@ function formFijo(fijo, occ) {
     </div>
     <p class="hint" id="hint-sem" ${semanal ? '' : 'hidden'} style="margin:-4px 0 12px">Cada quincena trae 2 o 3 veces ese día; la app las pone todas en la lista.</p>
     <label class="campo" id="campo-cat" ${f.tipo === 'ingreso' ? 'hidden' : ''}>Categoría<select name="cat">${opciones(catsGasto, f.cat)}</select></label>
+    <label class="campo"><span id="lbl-medio-f">${f.tipo === 'ingreso' ? '¿A qué cuenta entra?' : '¿Con qué se paga?'}</span><select name="medio" id="sel-medio-f">${opcionesMedio(medio, f.tipo === 'gasto')}</select></label>
     ${fijo ? `<div class="acciones">
       ${puedeOmitir ? `<button type="button" class="btn mini sec" data-action="omitir-fijo" data-id="${fijo.id}" data-clave="${occ.clave}">Quitar solo esta vez (${occ.etiqueta})</button>` : ''}
       <button type="button" class="btn mini peligro" data-action="borrar-fijo" data-id="${fijo.id}">Eliminar para siempre</button>
@@ -870,11 +1036,16 @@ function formFijo(fijo, occ) {
     const cuando = d.cuando;
     const dia = cuando === 'mensual' ? parseInt(d.dia) || null : null;
     if (cuando === 'mensual' && !dia) return toast('Indica el día del mes'), false;
-    const datos = { tipo: d.tipo, nombre: d.nombre.trim(), monto, cat: d.tipo === 'ingreso' ? 'Sueldo' : d.cat, cuando, dia, diaSemana: cuando === 'semanal' ? +d.diaSemana : null };
+    const datos = { tipo: d.tipo, nombre: d.nombre.trim(), monto, cat: d.tipo === 'ingreso' ? 'Sueldo' : d.cat, cuando, dia, diaSemana: cuando === 'semanal' ? +d.diaSemana : null, medio: d.medio };
     if (fijo) Object.assign(fijo, datos); else S.fijos.push({ id: uid(), ...datos, omitidos: [] });
     toast('📌 Fijo guardado');
   });
-  $$('#dlg-body input[name=tipo]').forEach(r => r.onchange = () => { $('#campo-cat').hidden = r.value === 'ingreso'; });
+  $$('#dlg-body input[name=tipo]').forEach(r => r.onchange = () => {
+    const ing = r.value === 'ingreso', sel = $('#sel-medio-f');
+    $('#campo-cat').hidden = ing;
+    $('#lbl-medio-f').textContent = ing ? '¿A qué cuenta entra?' : '¿Con qué se paga?';
+    sel.innerHTML = opcionesMedio(ing ? medioDefault(true) : sel.value, !ing);
+  });
   const sel = $('#dlg-body select[name=cuando]'), dia = $('#dlg-body input[name=dia]');
   sel.onchange = () => {
     const v = sel.value;
@@ -886,7 +1057,9 @@ function formFijo(fijo, occ) {
 function marcarFijo(f, q, fecha) {
   const mov = { id: uid(), tipo: f.tipo, monto: f.monto, cat: f.tipo === 'ingreso' ? (f.cat || 'Sueldo') : f.cat, fecha: fecha || fechaFijo(f, rango(q)), nota: f.nombre, fijoId: f.id };
   if (fecha) mov.ocurrencia = fecha; // semanal: identifica qué semana se pagó
+  aplicarMedio(mov, f.medio || medioDefault(f.tipo === 'ingreso'));
   S.movs.push(mov);
+  syncCargo(mov);
 }
 
 function formMeta(meta, sugerida) {
@@ -911,11 +1084,12 @@ function formAporte(meta, retiro) {
   dialogo(retiro ? `Retirar de ${meta.nombre}` : `Aportar a ${meta.nombre}`, `
     ${campo('Monto', `name="monto" type="number" inputmode="decimal" step="0.01" min="0.01" ${retiro ? `max="${disponible.toFixed(2)}"` : ''} required`, retiro ? `Disponible: ${fmt(disponible)}` : '')}
     ${campo('Fecha', `name="fecha" type="date" required value="${hoyISO()}"`)}
+    <label class="campo">${retiro ? '¿A qué cuenta regresa el dinero?' : '¿De qué cuenta sale?'}<select name="medio">${opcionesMedio(medioDefault(true), false)}</select></label>
     ${retiro ? campo('Motivo', 'name="nota" maxlength="80" placeholder="Ej. reparación del auto"') : '<input type="hidden" name="nota" value="">'}
   `, d => {
     const monto = num(d.monto);
     if (monto <= 0) return toast('Ingresa un monto válido'), false;
-    S.movs.push({ id: uid(), tipo: 'ahorro', monto: retiro ? -monto : monto, cat: meta.nombre, metaId: meta.id, fecha: d.fecha, nota: d.nota || (retiro ? 'Retiro' : 'Aportación') });
+    S.movs.push({ id: uid(), tipo: 'ahorro', monto: retiro ? -monto : monto, cat: meta.nombre, metaId: meta.id, fecha: d.fecha, nota: d.nota || (retiro ? 'Retiro' : 'Aportación'), cuentaId: d.medio.slice(2) });
     toast(retiro ? 'Retiro registrado' : '🐷 ¡Bien! Aportación registrada');
   }, retiro ? 'Retirar' : 'Aportar');
 }
@@ -967,6 +1141,9 @@ function formMSI(compra) {
       ${campo('Día de pago', `name="diaPago" type="number" min="1" max="31" value="${x.diaPago || ''}"`, 'El de tu tarjeta')}
     </div>
     ${campo('Mensualidades ya pagadas', `name="inicial" type="number" min="0" max="72" value="${x.inicial}"`, 'Si la compra es de antes, cuántas llevas pagadas')}
+    ${compra ? '' : `<label class="check"><input type="checkbox" name="comoGasto" checked> Contar la compra como gasto de hoy (no descuenta de tus cuentas)</label>
+    <label class="campo">Categoría del gasto<select name="catGasto">${opciones(CATS_GASTO, 'Otros gastos')}</select>
+      <span class="hint">Desmárcalo si la compra es de un mes anterior y ya la tenías registrada.</span></label>`}
     <div class="tip info" id="msi-prev"><span class="ic">🧮</span><div></div></div>
   `, d => {
     const monto = num(d.monto), meses = parseInt(d.meses) || 0, tasa = d.conInt === '1' ? num(d.tasa) : 0;
@@ -975,7 +1152,13 @@ function formMSI(compra) {
     const tarjeta = S.deudas.find(t => t.id === d.tarjetaId);
     const datos = { nombre: d.nombre.trim(), tarjetaId: d.tarjetaId || null, monto, meses, tasa, primerMes: d.primerMes,
       diaPago: parseInt(d.diaPago) || tarjeta?.diaPago || 1, inicial: Math.min(parseInt(d.inicial) || 0, meses) };
-    if (compra) Object.assign(compra, datos); else S.msi.push({ id: uid(), ...datos, pagos: [] });
+    if (compra) Object.assign(compra, datos);
+    else {
+      const nueva = { id: uid(), ...datos, pagos: [] };
+      S.msi.push(nueva);
+      // El consumo ocurre al comprar; las mensualidades son pagos de esa deuda
+      if (d.comoGasto) S.movs.push({ id: uid(), tipo: 'gasto', monto, cat: d.catGasto, fecha: hoyISO(), nota: `${datos.nombre} (a ${meses} meses)`, msiCompraId: nueva.id });
+    }
     toast('🛍️ Compra a meses guardada');
   });
   // Vista previa en vivo de la mensualidad
@@ -1008,13 +1191,14 @@ function formPago(d) {
       <button type="button" class="chip" data-fill="${s.toFixed(2)}">Liquidar todo</button>
     </div>
     ${campo('Fecha', `name="fecha" type="date" required value="${hoyISO()}"`)}
-    <label class="check"><input type="checkbox" name="comoGasto" checked> Registrarlo también como gasto de la quincena</label>
+    <label class="campo">¿De qué cuenta pagaste?<select name="medio">${opcionesMedio(medioDefault(true), false)}</select></label>
+    <p class="hint">Pagar la tarjeta no es un gasto nuevo (el gasto fue cuando compraste): baja tu cuenta y baja la deuda.</p>
   `, f => {
     const monto = num(f.monto);
     if (monto <= 0) return toast('Ingresa un monto válido'), false;
     const h = { id: uid(), fecha: f.fecha, tipo: 'pago', monto };
     d.hist.push(h);
-    if (f.comoGasto) S.movs.push({ id: uid(), tipo: 'gasto', monto, cat: 'Pago de deuda', fecha: f.fecha, nota: d.nombre, deudaId: d.id, histId: h.id });
+    S.movs.push({ id: uid(), tipo: 'pago', monto, cat: 'Pago de deuda', fecha: f.fecha, nota: d.nombre, deudaId: d.id, histId: h.id, cuentaId: f.medio.slice(2) });
     toast(saldoDeuda(d) <= 0.5 ? `🎉 ¡Liquidaste ${d.nombre}!` : '✅ Pago registrado');
   }, 'Registrar pago');
   $$('#dlg-body [data-fill]').forEach(b => b.onclick = () => { $('#dlg-body input[name=monto]').value = b.dataset.fill; });
@@ -1022,16 +1206,24 @@ function formPago(d) {
 
 function formCargo(d) {
   dialogo(`Cargo a ${d.nombre}`, `
-    <label class="campo">Tipo<select name="tipo"><option value="cargo">Compra / cargo nuevo</option><option value="interes">Intereses o comisiones del estado de cuenta</option></select></label>
+    <label class="campo">Tipo<select name="tipo"><option value="cargo">Compra con esta tarjeta</option><option value="interes">Intereses o comisiones del estado de cuenta</option></select></label>
     ${campo('Monto', 'name="monto" type="number" inputmode="decimal" step="0.01" min="0.01" required')}
-    ${campo('Fecha', `name="fecha" type="date" required value="${hoyISO()}"`)}
-    <p class="hint">Consejo: mientras estés liquidando esta deuda, evita nuevas compras con ella.</p>
+    <label class="campo" id="campo-cat-cargo">Categoría<select name="cat">${opciones(CATS_GASTO.filter(c => c !== 'Intereses y comisiones'), 'Otros gastos')}</select></label>
+    <div class="grid2">
+      ${campo('Fecha', `name="fecha" type="date" required value="${hoyISO()}"`)}
+      ${campo('Nota (opcional)', 'name="nota" maxlength="80"')}
+    </div>
+    <p class="hint">Se registra como gasto pagado con esta tarjeta: sube su saldo y no descuenta de tus cuentas. Consejo: mientras la estés liquidando, evita nuevas compras con ella.</p>
   `, f => {
     const monto = num(f.monto);
     if (monto <= 0) return toast('Ingresa un monto válido'), false;
-    d.hist.push({ id: uid(), fecha: f.fecha, tipo: f.tipo, monto });
+    const m = { id: uid(), tipo: 'gasto', monto, cat: f.tipo === 'interes' ? 'Intereses y comisiones' : f.cat, fecha: f.fecha, nota: f.nota.trim() || d.nombre, tarjetaId: d.id };
+    S.movs.push(m);
+    syncCargo(m);
     toast('Cargo registrado');
   });
+  const tipo = $('#dlg-body select[name=tipo]');
+  tipo.onchange = () => { $('#campo-cat-cargo').hidden = tipo.value === 'interes'; };
 }
 
 function confirmar(titulo, texto, onOk, textoOk = 'Eliminar') {
@@ -1089,7 +1281,7 @@ function validarDatos(d) {
 }
 async function aplicarDatos(d, msg) {
   await puntoRestauracion('Antes de restaurar');
-  S = { ...estadoVacio(), ...structuredClone(d), ajustes: { ...estadoVacio().ajustes, ...d.ajustes } };
+  S = migrar({ ...estadoVacio(), ...structuredClone(d), ajustes: { ...estadoVacio().ajustes, ...d.ajustes } });
   await DB.escribir(S);
   render(); pintarRespaldos();
   toast(msg);
@@ -1102,12 +1294,20 @@ const ACCIONES = {
   'editar-mov': el => formMov(buscarId(S.movs, el.dataset.id)),
   'borrar-mov': el => {
     const m = buscarId(S.movs, el.dataset.id);
-    confirmar('Eliminar movimiento', `¿Eliminar <b>${esc(m.cat)}</b> por ${fmt(Math.abs(m.monto))}?${m.histId || m.pagoId ? '<br><span class="small muted">También se quitará el pago del historial de la deuda.</span>' : ''}`, () => {
-      if (m.deudaId) { const d = buscarId(S.deudas, m.deudaId); if (d) d.hist = d.hist.filter(h => h.id !== m.histId); }
-      if (m.msiId) { const c = buscarId(S.msi, m.msiId); if (c) c.pagos = c.pagos.filter(p => p.id !== m.pagoId); }
-      S.movs = S.movs.filter(x => x !== m);
+    const extra = m.histId || m.pagoId ? 'También se quitará el pago del historial de la deuda.' : m.tarjetaId ? 'También se quitará el cargo de la tarjeta.' : '';
+    confirmar('Eliminar movimiento', `¿Eliminar <b>${esc(m.cat)}</b> por ${fmt(Math.abs(m.monto))}?${extra ? `<br><span class="small muted">${extra}</span>` : ''}`, () => quitarMov(m));
+  },
+  'nueva-cuenta': () => formCuenta(),
+  'editar-cuenta': el => formCuenta(buscarId(S.cuentas, el.dataset.id)),
+  'borrar-cuenta': el => {
+    const c = buscarId(S.cuentas, el.dataset.id);
+    $('#dlg').close();
+    confirmar('Eliminar cuenta', `¿Eliminar la cuenta <b>${esc(c.nombre)}</b>?`, () => {
+      S.cuentas = S.cuentas.filter(x => x !== c);
+      S.fijos.forEach(f => { if (f.medio === 'c:' + c.id) delete f.medio; });
     });
   },
+  traspaso: () => formTraspaso(),
   filtro: el => { filtroMov = el.dataset.v; render(); },
   'mes-prev': () => cambiarMes(-1),
   'mes-next': () => cambiarMes(1),
@@ -1138,7 +1338,7 @@ const ACCIONES = {
     const f = buscarId(S.fijos, el.dataset.id);
     const r = rango(el.dataset.q), fecha = el.dataset.fecha;
     const mov = S.movs.find(x => x.fijoId === f.id && (fecha ? x.ocurrencia === fecha : !x.ocurrencia && enRango(x.fecha, r)));
-    if (mov) { S.movs = S.movs.filter(x => x !== mov); toast('Desmarcado'); }
+    if (mov) { quitarMov(mov); toast('Desmarcado'); }
     else { marcarFijo(f, el.dataset.q, fecha); toast(f.tipo === 'ingreso' ? `💰 ${f.nombre} recibido` : `✅ ${f.nombre} pagado`); }
     guardar(); render();
   },
@@ -1212,7 +1412,7 @@ const ACCIONES = {
   'toggle-iva': el => { S.ajustes.iva = el.checked; guardar(); },
   instalar: async () => { if (!deferredInstall) return; deferredInstall.prompt(); await deferredInstall.userChoice; deferredInstall = null; render(); },
   'borrar-todo': () => confirmar('Borrar todo', 'Se eliminarán todos tus movimientos, metas y deudas. Se guardará un punto de restauración por si te arrepientes.', () => {
-    setTimeout(async () => { await puntoRestauracion('Antes de borrar todo'); S = estadoVacio(); await DB.escribir(S); render(); pintarRespaldos(); toast('Datos borrados'); });
+    setTimeout(async () => { await puntoRestauracion('Antes de borrar todo'); S = migrar(estadoVacio()); await DB.escribir(S); render(); pintarRespaldos(); toast('Datos borrados'); });
   }, 'Borrar todo'),
   'cerrar-dlg': () => $('#dlg').close(),
 };
@@ -1257,6 +1457,7 @@ async function iniciar() {
     await DB.abrir();
     const guardado = await DB.leer();
     if (guardado && validarDatos(guardado)) S = { ...estadoVacio(), ...guardado, ajustes: { ...estadoVacio().ajustes, ...guardado.ajustes } };
+    migrar(S);
     per = periodoDe(hoyISO());
     await respaldoAutomatico();
   } catch (e) {
