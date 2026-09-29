@@ -1,8 +1,13 @@
 // Versión de la app. Súbela en cada cambio publicado: la usan app.js (pantalla y avisos)
 // y sw.js (nombre de la caché, para que la app instalada descargue la versión nueva).
-const VERSION = '1.9.0';
+const VERSION = '1.10.0';
 
 const NOVEDADES = [
+  { v: '1.10.0', fecha: '2026-09-29', cambios: [
+    'Préstamos personales, automotrices e hipotecarios con pago fijo: pagos restantes, fecha de término e intereses por pagar.',
+    'Entre personas: lleva lo que prestas y lo que te prestan, con sus abonos.',
+    'Los créditos hipotecarios ya no suman IVA a los intereses.',
+  ] },
   { v: '1.9.0', fecha: '2026-09-29', cambios: [
     'Ahorro → Gastos del año: tenencia, seguro, predial, inscripciones, regalos… con cuánto apartar por quincena.',
     '"Ya lo pagué" usa lo apartado, registra el gasto y lo pasa al año siguiente.',

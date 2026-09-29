@@ -34,7 +34,9 @@ const GRUPO = Object.fromEntries(CATS.gasto);
 const CATS_GASTO = CATS.gasto.map(c => c[0]).filter(c => c !== 'Pago de deuda');
 const TIPOS_CUENTA = { debito: 'Débito / nómina', efectivo: 'Efectivo', ahorro: 'Cuenta de ahorro / inversión' };
 const ICON_CUENTA = { debito: '🏦', efectivo: '💵', ahorro: '🏛️' };
-const TIPOS_DEUDA = { tc: 'Tarjeta de crédito', dep: 'Tienda departamental', prestamo: 'Préstamo personal', otra: 'Otra' };
+const TIPOS_DEUDA = { tc: 'Tarjeta de crédito', dep: 'Tienda departamental', prestamo: 'Préstamo personal / nómina', auto: 'Crédito automotriz', hipoteca: 'Crédito hipotecario', otra: 'Otra' };
+// Tarjetas (revolventes) vs. préstamos con pago fijo
+const esRevolvente = d => d.tipo === 'tc' || d.tipo === 'dep';
 const IVA = 1.16; // En México el IVA se cobra sobre los intereses de tarjetas
 
 /* ---------- Estado ---------- */
@@ -49,6 +51,7 @@ const estadoVacio = () => ({
   msi: [],      // compras a meses {id, nombre, tarjetaId?, monto, meses, tasa (0 = MSI), primerMes:'YYYY-MM', diaPago, inicial, pagos:[{id,fecha,mes,monto}]}
   fijos: [],    // {id, tipo:'gasto'|'ingreso', nombre, monto, cat, cuando:'cada'|'q1'|'q2'|'semanal', dia?, diaSemana?}
   presupuestos: {}, // { categoría: tope por quincena }
+  personas: [], // préstamos entre personas {id, nombre, sentido:'meDeben'|'debo', monto, fecha, nota}
   ajustes: { iva: true, estrategia: 'avalancha', presupuestoDeuda: 0, ultimoExport: null, modo: 'quincena', ultimoMedio: null, cuentasRevisadas: false },
 });
 
@@ -159,9 +162,10 @@ const movsPer = p => { const r = rango(p); return S.movs.filter(x => enRango(x.f
 // Compras con tarjeta o a meses: son gasto (consumo) pero no sacan dinero de tus cuentas hoy
 const esCredito = m => !!(m.tarjetaId || m.msiCompraId);
 function totales(p) {
-  const t = { ingreso: 0, gasto: 0, conTarjeta: 0, pagos: 0, ahorro: 0, N: 0, D: 0, A: 0, porCat: {} };
+  const t = { ingreso: 0, gasto: 0, conTarjeta: 0, pagos: 0, ahorro: 0, personal: 0, N: 0, D: 0, A: 0, porCat: {} };
   for (const x of movsPer(p)) {
     if (x.tipo === 'ingreso') t.ingreso += x.monto;
+    else if (x.tipo === 'personal') t.personal += x.monto; // préstamos entre personas: no son ingreso ni gasto
     else if (x.tipo === 'ahorro') t.ahorro += x.monto;
     else if (x.tipo === 'pago') t.pagos += x.monto;
     else if (x.tipo === 'gasto') {
@@ -175,10 +179,15 @@ function totales(p) {
   // (lo pagado menos lo que volviste a cargar a tarjetas), para no contar dos veces la misma compra
   t.A = t.ahorro + Math.max(0, t.pagos - t.conTarjeta);
   // Dinero libre = lo que entró menos lo que salió de tus cuentas
-  t.salidas = t.gasto - t.conTarjeta + t.pagos + t.ahorro;
-  t.libre = t.ingreso - t.salidas;
+  t.salidas = t.gasto - t.conTarjeta + t.pagos + t.ahorro + Math.max(0, -t.personal);
+  t.libre = t.ingreso + Math.max(0, t.personal) - t.salidas;
   return t;
 }
+
+/* ---------- Préstamos entre personas ---------- */
+const abonadoPersona = p => S.movs.filter(m => m.personaId === p.id && m.abono).reduce((a, m) => a + Math.abs(m.monto), 0);
+const pendientePersona = p => Math.max(0, p.monto - abonadoPersona(p));
+const totalPersonas = sentido => S.personas.filter(p => p.sentido === sentido).reduce((a, p) => a + pendientePersona(p), 0);
 
 /* ---------- Cuentas y medio de pago ---------- */
 const cuentaDefault = () => S.cuentas[0]?.id;
@@ -186,6 +195,7 @@ function flujoCuenta(id) {
   let s = 0;
   for (const m of S.movs) {
     if (m.tipo === 'traspaso') { if (m.cuentaId === id) s -= m.monto; if (m.destinoId === id) s += m.monto; continue; }
+    if (m.tipo === 'personal') { if (m.cuentaId === id) s += m.monto; continue; } // con signo: + entra, − sale
     if (m.cuentaId === id) s += m.tipo === 'ingreso' ? m.monto : -m.monto; // un retiro de ahorro (negativo) regresa a la cuenta
   }
   return s;
@@ -233,7 +243,17 @@ function quitarMov(m) {
 const acumuladoMeta = mt => mt.inicial + S.movs.filter(x => x.metaId === mt.id).reduce((a, x) => a + x.monto, 0);
 const saldoDeuda = d => Math.max(0, d.saldoInicial + d.hist.reduce((a, h) => a + (h.tipo === 'pago' ? -h.monto : h.monto), 0));
 const factorIVA = () => (S.ajustes.iva ? IVA : 1);
-const interesMensual = d => saldoDeuda(d) * d.tasa / 100 / 12 * factorIVA();
+// Los intereses de créditos hipotecarios no pagan IVA; los demás sí
+const factorDeuda = d => d.tipo === 'hipoteca' ? 1 : factorIVA();
+const interesMensual = d => saldoDeuda(d) * d.tasa / 100 / 12 * factorDeuda(d);
+// Préstamo con pago fijo: cuántos pagos faltan y cuánto interés falta (null si el pago no alcanza)
+function plazoRestante(d) {
+  const s = saldoDeuda(d), r = d.tasa / 100 / 12 * factorDeuda(d), p = d.minimo;
+  if (s <= 0.5) return { pagos: 0, intereses: 0 };
+  if (p <= 0 || (r > 0 && p <= s * r)) return null;
+  const n = r > 0 ? Math.ceil(-Math.log(1 - r * s / p) / Math.log(1 + r)) : Math.ceil(s / p);
+  return { pagos: n, intereses: Math.max(0, n * p - s) };
+}
 const deudasActivas = () => S.deudas.filter(d => saldoDeuda(d) > 0.5);
 
 /* ---------- Compras a meses (MSI o con intereses) ---------- */
@@ -359,8 +379,7 @@ function proximaFecha(dia) {
  * - Al liquidar una deuda, su mínimo se "rueda" a la siguiente (efecto bola de nieve).
  */
 function simular(presupuesto, estrategia) {
-  const f = factorIVA();
-  const ds = deudasActivas().map(d => ({ id: d.id, nombre: d.nombre, tipo: d.tipo, saldo: saldoDeuda(d), tasa: d.tasa, min: d.minimo, interes: 0, mes: null }));
+  const ds = deudasActivas().map(d => ({ id: d.id, nombre: d.nombre, tipo: d.tipo, saldo: saldoDeuda(d), tasa: d.tasa, min: d.minimo, f: factorDeuda(d), interes: 0, mes: null }));
   if (!ds.length) return { meses: 0, interes: 0, orden: [] };
   const sumMin = ds.reduce((a, d) => a + Math.min(d.min, d.saldo), 0);
   if (presupuesto + 0.01 < sumMin) return { error: 'insuficiente', sumMin };
@@ -371,7 +390,7 @@ function simular(presupuesto, estrategia) {
   while (ds.some(d => d.saldo > 0.005) && mesN < 600) {
     mesN++;
     const activas = ds.filter(d => d.saldo > 0.005);
-    for (const d of activas) { const i = d.saldo * d.tasa / 100 / 12 * f; d.saldo += i; d.interes += i; interes += i; }
+    for (const d of activas) { const i = d.saldo * d.tasa / 100 / 12 * d.f; d.saldo += i; d.interes += i; interes += i; }
     let disp = presupuesto;
     for (const d of activas) { const p = Math.min(d.min, d.saldo, disp); d.saldo -= p; disp -= p; }
     for (const d of activas.sort(ordenar)) { if (disp <= 0) break; const p = Math.min(disp, d.saldo); d.saldo -= p; disp -= p; }
@@ -382,10 +401,10 @@ function simular(presupuesto, estrategia) {
 
 // Escenario de pagar SOLO el mínimo fijo en cada deuda, sin rodar pagos
 function simularSoloMinimos() {
-  const f = factorIVA();
   let maxMes = 0, interes = 0, sinFin = false;
   for (const d of deudasActivas()) {
     let s = saldoDeuda(d), m = 0;
+    const f = factorDeuda(d);
     while (s > 0.005 && m < 600) { m++; const i = s * d.tasa / 100 / 12 * f; s += i; interes += i; s -= Math.min(d.minimo, s); }
     if (m >= 600) sinFin = true;
     maxMes = Math.max(maxMes, m);
@@ -417,7 +436,9 @@ function consejos(t) {
 
     if (t.N / ing > 0.6) add('warn', '🏠', `Tus necesidades consumen el ${pct(t.N / ing)} del ingreso (ideal ≤ 50%). Revisa renta, servicios y súper para encontrar ahorros.`);
     if (t.D / ing > 0.3) add('warn', '🛍️', `Los gastos de deseos son el ${pct(t.D / ing)} del ingreso (ideal ≤ 30%). Es el rubro más fácil de recortar.`);
-    if (t.libre < 0) add('bad', '🚨', `Gastaste ${fmt(-t.libre)} más de lo que ingresó ${palabraPeriodo()}. Revisa si estás financiando el día a día con tarjeta.`);
+    // Sin contar lo que prestaste (eso regresa): ¿salió más de lo que entró?
+    const deficit = -(t.libre - Math.min(0, t.personal));
+    if (deficit > 0) add('bad', '🚨', `Salió ${fmt(deficit)} más de lo que ingresó ${palabraPeriodo()}. Revisa si estás financiando el día a día con tarjeta o con tus ahorros.`);
   }
   // Presupuesto: las categorías más comprometidas primero
   const pres = estadoPresupuesto(t).filter(f => f.tope && f.uso >= 0.8);
@@ -426,6 +447,12 @@ function consejos(t) {
     else add('warn', '📊', `Ya usaste el ${pct(f.uso)} del presupuesto de <b>${esc(f.cat)}</b>: te quedan ${fmt(f.tope - f.gastado)} para ${palabraPeriodo()}.`);
   }
   if (!hayPresupuesto() && S.movs.filter(m => m.tipo === 'gasto').length >= 10) add('info', '📊', 'Ya tienes suficientes gastos registrados: pon un <b>presupuesto por categoría</b> (botón en "Gastos por categoría"). La app te lo puede sugerir con tu historial.');
+  // Préstamos entre personas
+  for (const p of S.personas.filter(p => pendientePersona(p) > 0.5)) {
+    const dias = Math.round((Date.now() - new Date(p.fecha + 'T12:00')) / 864e5);
+    if (p.sentido === 'meDeben' && dias > 30) add('info', '🤝', `<b>${esc(p.nombre)}</b> te debe ${fmt(pendientePersona(p))} desde hace ${dias} días. Acuerda una fecha de pago; no cuentes con ese dinero para tus gastos.`);
+    if (p.sentido === 'debo') add('info', '🤝', `Debes ${fmt(pendientePersona(p))} a <b>${esc(p.nombre)}</b>. Aunque no cobre intereses, ponle fecha y abona cada quincena: cuida tu palabra y la relación.`);
+  }
   // Gastos del año que ya se acercan sin estar cubiertos
   for (const m of previsiones()) {
     const qs = quincenasHasta(m.fechaMeta), falta = faltaPrevision(m);
@@ -799,7 +826,7 @@ const VISTAS = {
     const pend = pendientes(per);
     const proyectado = t.libre + pend.ingreso - pend.gasto - pend.tarjetas;
     const ing = t.ingreso || 1;
-    const totalDeuda = deudasActivas().reduce((a, d) => a + saldoDeuda(d), 0) + msiActivas().reduce((a, c) => a + saldoMSI(c), 0);
+    const totalDeuda = deudasActivas().reduce((a, d) => a + saldoDeuda(d), 0) + msiActivas().reduce((a, c) => a + saldoMSI(c), 0) + totalPersonas('debo');
 
     // Tendencia de los últimos 6 periodos
     const ult = Array.from({ length: 6 }, (_, i) => moverPeriodo(per, i - 5));
@@ -881,9 +908,10 @@ const VISTAS = {
     for (const x of lista) {
       if (x.fecha !== dia) { if (dia) html += '</ul>'; dia = x.fecha; html += `<p class="dia">${fechaCorta(dia)}</p><ul class="lista">`; }
       const traspaso = x.tipo === 'traspaso';
-      const signo = x.tipo === 'ingreso' ? '+' : x.tipo === 'ahorro' ? (x.monto < 0 ? '↩' : '→') : traspaso ? '↔' : '−';
-      const color = x.tipo === 'ingreso' ? 'c-ingreso' : x.tipo === 'ahorro' ? 'c-ahorro' : x.tipo === 'pago' ? 'c-deuda' : traspaso ? '' : 'c-gasto';
-      const ic = x.tipo === 'ingreso' ? '💰' : x.tipo === 'ahorro' ? '🐷' : x.tipo === 'pago' ? '💳' : traspaso ? '🔁' : x.fijoId ? '📌' : '🛒';
+      const personal = x.tipo === 'personal';
+      const signo = x.tipo === 'ingreso' ? '+' : x.tipo === 'ahorro' ? (x.monto < 0 ? '↩' : '→') : traspaso ? '↔' : personal ? (x.monto > 0 ? '+' : '−') : '−';
+      const color = x.tipo === 'ingreso' ? 'c-ingreso' : x.tipo === 'ahorro' ? 'c-ahorro' : x.tipo === 'pago' ? 'c-deuda' : traspaso || personal ? '' : 'c-gasto';
+      const ic = x.tipo === 'ingreso' ? '💰' : x.tipo === 'ahorro' ? '🐷' : x.tipo === 'pago' ? '💳' : traspaso ? '🔁' : personal ? '🤝' : x.fijoId ? '📌' : '🛒';
       const detalle = traspaso
         ? `${esc(nombreMedio(x))} → ${esc(nombreMedio({ cuentaId: x.destinoId }))}`
         : [esc(x.nota), esc(nombreMedio(x))].filter(Boolean).join(' · ');
@@ -951,15 +979,17 @@ const VISTAS = {
     // Una tarjeta en ceros pero con compras a meses sigue activa
     const visibles = S.deudas.filter(d => saldoDeuda(d) > 0.5 || msiDeTarjeta(d).length);
 
-    if (!S.deudas.length && !S.msi.length) return `<div class="card vacio"><div class="big">💳</div>
-      <p>Registra tus tarjetas de crédito y departamentales, y tus compras a meses (MSI).<br>Te armo un plan para liquidarlas y te digo cuánto ahorras en intereses.</p>
+    if (!S.deudas.length && !S.msi.length && !S.personas.length) return `<div class="card vacio"><div class="big">💳</div>
+      <p>Registra tus tarjetas, préstamos y compras a meses (MSI).<br>Te armo un plan para liquidarlas y te digo cuánto ahorras en intereses.</p>
       <div class="acciones" style="justify-content:center">
-        <button class="btn" data-action="nueva-deuda">Agregar tarjeta o deuda</button>
+        <button class="btn" data-action="nueva-deuda">Agregar tarjeta o préstamo</button>
         <button class="btn sec" data-action="nuevo-msi">Agregar compra a meses</button>
+        <button class="btn sec" data-action="nueva-persona">Préstamo entre personas</button>
       </div></div>`;
 
+    const debo = totalPersonas('debo');
     let html = `<div class="kpis" style="grid-template-columns:repeat(3,1fr)">
-      <div class="kpi"><div class="lbl">Deuda total</div><div class="val c-deuda">${fmt(total + totalMSI)}</div></div>
+      <div class="kpi"><div class="lbl">Deuda total</div><div class="val c-deuda">${fmt(total + totalMSI + debo)}</div></div>
       <div class="kpi"><div class="lbl">A pagar / mes</div><div class="val">${fmt(sumMin + mensMSI)}</div></div>
       <div class="kpi"><div class="lbl">Intereses / mes</div><div class="val c-deuda">${fmt(intMes)}</div></div>
     </div>`;
@@ -968,8 +998,9 @@ const VISTAS = {
     if (activas.length) html += planHTML(activas, sumMin, mensMSI);
 
     for (const d of visibles) html += tarjetaDeuda(d);
-    html += `<button class="btn sec" data-action="nueva-deuda" style="width:100%;margin-bottom:14px">+ Agregar tarjeta o deuda</button>`;
+    html += `<button class="btn sec" data-action="nueva-deuda" style="width:100%;margin-bottom:14px">+ Agregar tarjeta o préstamo</button>`;
     html += seccionMSI();
+    html += seccionPersonas();
     if (liquidadas.length) html += `<section class="card"><h2>🎉 Liquidadas</h2><ul class="lista">${liquidadas.map(d =>
       `<li><div class="info"><b>${esc(d.nombre)}</b><span class="muted small">${TIPOS_DEUDA[d.tipo]}</span></div>
        <button class="link-btn" data-action="borrar-deuda" data-id="${d.id}" aria-label="Eliminar">🗑️</button></li>`).join('')}</ul></section>`;
@@ -1079,6 +1110,68 @@ function planHTML(activas, sumMin, mensMSI = 0) {
   </section>`;
 }
 
+function seccionPersonas() {
+  const activos = S.personas.filter(p => pendientePersona(p) > 0.5);
+  const saldados = S.personas.filter(p => pendientePersona(p) <= 0.5);
+  const grupo = (sentido, titulo) => {
+    const l = activos.filter(p => p.sentido === sentido);
+    if (!l.length) return '';
+    return `<p class="dia">${titulo} · ${fmt(totalPersonas(sentido))}</p><ul class="lista">${l.map(p => `<li>
+      <span style="font-size:1.3rem">${sentido === 'meDeben' ? '🫴' : '🤲'}</span>
+      <div class="info"><b>${esc(p.nombre)}</b><span class="muted small">desde ${fechaCorta(p.fecha)}${p.nota ? ' · ' + esc(p.nota) : ''}${abonadoPersona(p) ? ` · abonado ${fmt(abonadoPersona(p))} de ${fmt(p.monto)}` : ''}</span></div>
+      <span class="monto ${sentido === 'meDeben' ? 'c-ingreso' : 'c-deuda'}">${fmt(pendientePersona(p))}</span>
+      <button class="btn mini sec" data-action="abono-persona" data-id="${p.id}">${sentido === 'meDeben' ? 'Me pagó' : 'Pagué'}</button>
+    </li>`).join('')}</ul>`;
+  };
+  return `<section class="card">
+    <div class="row"><h2 style="margin:0">🤝 Entre personas</h2><button class="btn mini" data-action="nueva-persona">+ Préstamo</button></div>
+    ${activos.length ? grupo('meDeben', 'Me deben') + grupo('debo', 'Debo')
+      : '<p class="small muted" style="margin-bottom:0">Lleva el control de lo que prestas y de lo que te prestan familiares o amigos. No es ingreso ni gasto: es dinero que va y regresa.</p>'}
+    ${saldados.length ? `<p class="dia">Saldados ✅</p><ul class="lista">${saldados.map(p => `<li><div class="info"><b>${esc(p.nombre)}</b><span class="muted small">${p.sentido === 'meDeben' ? 'Te pagó' : 'Pagaste'} ${fmt(p.monto)}</span></div><button class="link-btn" data-action="borrar-persona" data-id="${p.id}" aria-label="Eliminar">🗑️</button></li>`).join('')}</ul>` : ''}
+  </section>`;
+}
+
+function formPersona() {
+  dialogo('Préstamo entre personas', `
+    <div class="segmento">
+      <input type="radio" name="sentido" id="p-1" value="meDeben" checked><label for="p-1" class="ing">Yo presté</label>
+      <input type="radio" name="sentido" id="p-2" value="debo"><label for="p-2" class="gas">Me prestaron</label>
+    </div>
+    ${campo('¿Quién?', 'name="nombre" required maxlength="40" placeholder="Ej. Juan, mi hermana…"')}
+    <div class="grid2">
+      ${campo('Monto', 'name="monto" type="number" inputmode="decimal" min="0.01" step="0.01" required')}
+      ${campo('Fecha', `name="fecha" type="date" required value="${hoyISO()}"`)}
+    </div>
+    ${campo('Nota (opcional)', 'name="nota" maxlength="80" placeholder="Ej. para la renta, me paga en diciembre"')}
+    <label class="check"><input type="checkbox" name="mover" checked> El dinero salió / entró de mi cuenta hoy</label>
+    <label class="campo">Cuenta<select name="medio">${opcionesMedio(medioDefault(true), false)}</select>
+      <span class="hint">Desmarca la casilla si es un préstamo de antes y solo quieres llevar el control.</span></label>
+  `, d => {
+    const monto = num(d.monto);
+    if (monto <= 0) return toast('Ingresa un monto válido'), false;
+    const p = { id: uid(), nombre: d.nombre.trim(), sentido: d.sentido, monto, fecha: d.fecha, nota: d.nota.trim() };
+    S.personas.push(p);
+    if (d.mover) S.movs.push({ id: uid(), tipo: 'personal', monto: d.sentido === 'meDeben' ? -monto : monto, cat: d.sentido === 'meDeben' ? `Préstamo a ${p.nombre}` : `Préstamo de ${p.nombre}`, fecha: d.fecha, nota: p.nota, personaId: p.id, cuentaId: d.medio.slice(2) });
+    toast('🤝 Préstamo registrado');
+  });
+}
+
+function formAbonoPersona(p) {
+  const pend = pendientePersona(p), meDeben = p.sentido === 'meDeben';
+  dialogo(meDeben ? `${p.nombre} te pagó` : `Pago a ${p.nombre}`, `
+    ${campo('Monto', `name="monto" type="number" inputmode="decimal" min="0.01" step="0.01" max="${pend.toFixed(2)}" required value="${pend.toFixed(2)}"`, `Pendiente: ${fmt(pend)}`)}
+    <div class="grid2">
+      ${campo('Fecha', `name="fecha" type="date" required value="${hoyISO()}"`)}
+      <label class="campo">${meDeben ? '¿A qué cuenta entró?' : '¿De qué cuenta salió?'}<select name="medio">${opcionesMedio(medioDefault(true), false)}</select></label>
+    </div>
+  `, d => {
+    const monto = Math.min(num(d.monto), pend);
+    if (monto <= 0) return toast('Ingresa un monto válido'), false;
+    S.movs.push({ id: uid(), tipo: 'personal', monto: meDeben ? monto : -monto, cat: meDeben ? `Abono de ${p.nombre}` : `Abono a ${p.nombre}`, fecha: d.fecha, nota: '', personaId: p.id, abono: true, cuentaId: d.medio.slice(2) });
+    toast(pendientePersona(p) <= 0.5 ? '✅ ¡Saldado!' : 'Abono registrado');
+  }, 'Registrar');
+}
+
 function seccionMSI() {
   const activas = msiActivas();
   const terminadas = S.msi.filter(c => restantesMSI(c) <= 0);
@@ -1115,6 +1208,7 @@ function tarjetaDeuda(d) {
   const sMSI = ligadas.reduce((a, c) => a + saldoMSI(c), 0), mMSI = ligadas.reduce((a, c) => a + mensualidad(c), 0);
   const uso = d.limite > 0 ? (s + sMSI) / d.limite : null;
   const cls = d.tipo === 'dep' ? 'dep' : d.tipo === 'tc' ? 'tc' : '';
+  const plazo = esRevolvente(d) ? null : plazoRestante(d);
   const ultimos = [...d.hist].sort((a, b) => b.fecha.localeCompare(a.fecha)).slice(0, 3);
   return `<section class="card">
     <div class="deuda-top">
@@ -1126,16 +1220,18 @@ function tarjetaDeuda(d) {
     ${ligadas.length ? `<div class="tip info"><span class="ic">🛍️</span><div>${ligadas.length} compra${ligadas.length > 1 ? 's' : ''} a meses en esta tarjeta: <b>${fmt(mMSI)}/mes</b> (te faltan ${fmt(sMSI)}). Súmalo a tu pago de cada mes.</div></div>` : ''}
     <div class="datos">
       <div>Tasa anual<b>${d.tasa}%</b></div>
-      <div>Pago mínimo<b>${fmt(d.minimo)}</b></div>
+      <div>${esRevolvente(d) ? 'Pago mínimo' : 'Pago mensual'}<b>${fmt(d.minimo)}</b></div>
       <div>Interés / mes<b class="${i > 0 && d.minimo <= i ? 'c-deuda' : ''}">${fmt(i)}</b></div>
-      ${corte ? `<div>Corte<b>${corte.fecha.getDate()} ${MESES[corte.fecha.getMonth()]}</b></div>` : ''}
+      ${!esRevolvente(d) && plazo ? `<div>Pagos restantes<b>${plazo.pagos}</b></div><div>Terminas en<b>${fechaFin(plazo.pagos)}</b></div><div>Intereses por pagar<b class="c-deuda">${fmt(plazo.intereses)}</b></div>` : ''}
+      ${corte && esRevolvente(d) ? `<div>Corte<b>${corte.fecha.getDate()} ${MESES[corte.fecha.getMonth()]}</b></div>` : ''}
       ${pago ? `<div>Pagar antes de<b style="${pago.dias <= 5 ? 'color:var(--deuda)' : ''}">${pago.fecha.getDate()} ${MESES[pago.fecha.getMonth()]}</b></div><div>Faltan<b>${pago.dias} día${pago.dias === 1 ? '' : 's'}</b></div>` : ''}
     </div>
-    ${i > 0 && d.minimo <= i ? `<div class="tip bad"><span class="ic">⛔</span><div>El mínimo no cubre los intereses: esta deuda crece cada mes.</div></div>` : ''}
+    ${i > 0 && d.minimo <= i ? `<div class="tip bad"><span class="ic">⛔</span><div>${esRevolvente(d) ? 'El mínimo' : 'El pago'} no cubre los intereses: esta deuda crece cada mes.</div></div>` : ''}
+    ${!esRevolvente(d) && plazo && plazo.pagos > 6 ? `<div class="tip info"><span class="ic">💡</span><div>Abonar a capital acorta el plazo y te ahorra intereses. Pide a tu banco que el abono sea para <b>reducir el plazo</b>, no la mensualidad.</div></div>` : ''}
     ${ultimos.length ? `<ul class="lista small" style="margin-top:8px">${ultimos.map(h => `<li><span>${h.tipo === 'pago' ? '✅' : '🛍️'}</span><div class="info">${h.tipo === 'pago' ? 'Pago' : h.tipo === 'interes' ? 'Intereses / comisiones' : 'Cargo'} · <span class="muted">${fechaCorta(h.fecha)}</span></div><span class="monto ${h.tipo === 'pago' ? 'c-ingreso' : 'c-deuda'}">${h.tipo === 'pago' ? '−' : '+'}${fmt(h.monto)}</span></li>`).join('')}</ul>` : ''}
     <div class="acciones">
       <button class="btn mini" data-action="pagar-deuda" data-id="${d.id}">Registrar pago</button>
-      <button class="btn mini sec" data-action="cargo-deuda" data-id="${d.id}">+ Cargo / intereses</button>
+      ${esRevolvente(d) ? `<button class="btn mini sec" data-action="cargo-deuda" data-id="${d.id}">+ Cargo / intereses</button>` : ''}
       <button class="btn mini sec" data-action="editar-deuda" data-id="${d.id}">Editar</button>
       <button class="btn mini sec" data-action="borrar-deuda" data-id="${d.id}">Eliminar</button>
     </div>
@@ -1350,9 +1446,9 @@ function formDeuda(deuda) {
     <div class="grid2">
       ${campo('Saldo actual', `name="saldo" type="number" inputmode="decimal" min="0" step="0.01" required value="${d.saldo}"`)}
       ${campo('Tasa anual %', `name="tasa" type="number" inputmode="decimal" min="0" max="300" step="0.01" required value="${d.tasa}"`, 'Viene en tu estado de cuenta')}
-      ${campo('Pago mínimo', `name="minimo" type="number" inputmode="decimal" min="0" step="0.01" required value="${d.minimo}"`)}
-      ${campo('Límite de crédito', `name="limite" type="number" inputmode="decimal" min="0" step="0.01" value="${d.limite}"`, 'Opcional')}
-      ${campo('Día de corte', `name="diaCorte" type="number" min="1" max="31" value="${d.diaCorte}"`)}
+      <label class="campo"><span id="lbl-minimo">Pago mínimo</span><input name="minimo" type="number" inputmode="decimal" min="0" step="0.01" required value="${d.minimo}"></label>
+      <div class="solo-tarjeta">${campo('Límite de crédito', `name="limite" type="number" inputmode="decimal" min="0" step="0.01" value="${d.limite}"`, 'Opcional')}</div>
+      <div class="solo-tarjeta">${campo('Día de corte', `name="diaCorte" type="number" min="1" max="31" value="${d.diaCorte}"`)}</div>
       ${campo('Día límite de pago', `name="diaPago" type="number" min="1" max="31" value="${d.diaPago}"`)}
     </div>
     <p class="hint">Tip: usa la "tasa de interés ordinaria anual", no el CAT. El CAT incluye comisiones y sirve para comparar productos.</p>
@@ -1366,6 +1462,15 @@ function formDeuda(deuda) {
     } else S.deudas.push({ id: uid(), ...datos, saldoInicial: saldo, hist: [] });
     toast('💳 Deuda guardada');
   });
+  // Préstamos: pago mensual fijo, sin límite ni fecha de corte
+  const tipo = $('#dlg-body select[name=tipo]');
+  const ajustar = () => {
+    const tarjeta = tipo.value === 'tc' || tipo.value === 'dep';
+    $('#lbl-minimo').textContent = tarjeta ? 'Pago mínimo' : 'Pago mensual fijo';
+    $$('#dlg-body .solo-tarjeta').forEach(el => { el.hidden = !tarjeta; });
+  };
+  tipo.onchange = ajustar;
+  ajustar();
 }
 
 function formMSI(compra) {
@@ -1526,6 +1631,7 @@ function validarDatos(d) {
   if (d && !Array.isArray(d.fijos)) d.fijos = [];
   if (d && !Array.isArray(d.msi)) d.msi = [];
   if (d && (typeof d.presupuestos !== 'object' || !d.presupuestos)) d.presupuestos = {};
+  if (d && !Array.isArray(d.personas)) d.personas = [];
   return d && Array.isArray(d.movs) && Array.isArray(d.metas) && Array.isArray(d.deudas) && typeof d.ajustes === 'object';
 }
 async function aplicarDatos(d, msg) {
@@ -1547,6 +1653,12 @@ const ACCIONES = {
     confirmar('Eliminar movimiento', `¿Eliminar <b>${esc(m.cat)}</b> por ${fmt(Math.abs(m.monto))}?${extra ? `<br><span class="small muted">${extra}</span>` : ''}`, () => quitarMov(m));
   },
   presupuesto: () => formPresupuesto(),
+  'nueva-persona': () => formPersona(),
+  'abono-persona': el => formAbonoPersona(buscarId(S.personas, el.dataset.id)),
+  'borrar-persona': el => {
+    const p = buscarId(S.personas, el.dataset.id);
+    confirmar('Eliminar', `¿Quitar a <b>${esc(p.nombre)}</b> de la lista? Los movimientos de dinero se conservan.`, () => { S.personas = S.personas.filter(x => x !== p); });
+  },
   'nueva-cuenta': () => formCuenta(),
   'editar-cuenta': el => formCuenta(buscarId(S.cuentas, el.dataset.id)),
   'borrar-cuenta': el => {
