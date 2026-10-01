@@ -251,6 +251,8 @@ function quitarMov(m) {
   if (m.msiId) { const c = S.msi.find(c => c.id === m.msiId); if (c) c.pagos = c.pagos.filter(p => p.id !== m.pagoId); }
   S.movs = S.movs.filter(x => x !== m);
 }
+// "🏦 BBVA · Apartado": dónde vive el dinero de una meta
+const dondeMeta = m => { const c = S.cuentas.find(c => c.id === m.cuentaId); return c ? `${ICON_CUENTA[c.tipo]} ${esc(c.nombre)}${m.lugar ? ' · ' + esc(m.lugar) : ''}` : ''; };
 const acumuladoMeta = mt => mt.inicial + S.movs.filter(x => x.metaId === mt.id).reduce((a, x) => a + x.monto, 0);
 const saldoDeuda = d => Math.max(0, d.saldoInicial + d.hist.reduce((a, h) => a + (h.tipo === 'pago' ? -h.monto : h.monto), 0));
 const factorIVA = () => (S.ajustes.iva ? IVA : 1);
@@ -970,7 +972,7 @@ function htmlCuentas() {
     <ul class="lista">${S.cuentas.map(c => {
       const s = saldoCuenta(c);
       return `<li><span style="font-size:1.3rem">${ICON_CUENTA[c.tipo]}</span>
-        <div class="info"><b>${esc(c.nombre)}</b><span class="muted small">${TIPOS_CUENTA[c.tipo]}</span></div>
+        <div class="info"><b>${esc(c.nombre)}</b><span class="muted small">${TIPOS_CUENTA[c.tipo]}${(() => { const ap = S.metas.filter(m => m.cuentaId === c.id).reduce((a, m) => a + acumuladoMeta(m), 0); return ap > 0 ? ` · <span class="c-ahorro">+ ${fmt(ap)} en apartados</span>` : ''; })()}</span></div>
         <span class="monto ${s < 0 ? 'c-deuda' : ''}">${fmt(s)}</span>
         <button class="link-btn" data-action="editar-cuenta" data-id="${c.id}" aria-label="Editar o ajustar saldo">✏️</button></li>`;
     }).join('')}</ul>
@@ -1219,6 +1221,7 @@ const VISTAS = {
       }
       html += `<section class="card">
         <div class="row"><h3>${esc(m.nombre)}</h3><button class="link-btn" data-action="editar-meta" data-id="${m.id}" aria-label="Editar meta">✏️</button></div>
+        ${dondeMeta(m) ? `<div class="small muted" style="margin:-2px 0 6px">${dondeMeta(m)}</div>` : ''}
         <div class="row small"><span><b class="c-ahorro">${fmt(acc)}</b> de ${fmt(m.objetivo)}</span><b>${pct(Math.min(p, 1))}</b></div>
         <div class="bar" style="margin:6px 0"><span style="width:${Math.min(100, p * 100)}%;background:var(--ahorro)"></span></div>
         ${acc >= m.objetivo && m.objetivo > 0 ? '<div class="tip ok"><span class="ic">🎉</span><div>¡Meta alcanzada!</div></div>' : extra}
@@ -1812,9 +1815,16 @@ function formMeta(meta, sugerida) {
       ${campo('Ya tengo ahorrado', `name="inicial" type="number" inputmode="decimal" min="0" step="0.01" value="${m.inicial}"`)}
       ${campo('Fecha objetivo (opcional)', `name="fechaMeta" type="month" value="${m.fechaMeta || ''}"`)}
     </div>
+    <p class="dia" style="margin-top:4px">¿Dónde guardas este dinero?</p>
+    <div class="grid2">
+      <label class="campo">Banco / cuenta<select name="medio">${opcionesMedio(m.cuentaId && S.cuentas.some(c => c.id === m.cuentaId) ? 'c:' + m.cuentaId : medioDefault(true), false)}</select></label>
+      ${campo('Nombre del apartado', `name="lugar" maxlength="30" list="lugares" value="${esc(m.lugar || '')}" placeholder="Ej. Apartado, Cajita"`)}
+    </div>
+    <datalist id="lugares"><option value="Apartado"><option value="Cajita"><option value="Cuenta de ahorro"><option value="Inversión"></datalist>
+    <p class="hint" style="margin-top:-6px">Al aportar, el dinero sale de esa cuenta hacia el apartado (igual que en la app de tu banco: baja tu saldo disponible y sube tu apartado).</p>
     ${meta ? `<button type="button" class="btn mini peligro" data-action="borrar-meta" data-id="${meta.id}">Eliminar meta</button>` : ''}
   `, d => {
-    const datos = { nombre: d.nombre.trim(), objetivo: num(d.objetivo), inicial: num(d.inicial), fechaMeta: d.fechaMeta };
+    const datos = { nombre: d.nombre.trim(), objetivo: num(d.objetivo), inicial: num(d.inicial), fechaMeta: d.fechaMeta, cuentaId: d.medio.slice(2), lugar: d.lugar.trim() };
     if (meta) Object.assign(meta, datos); else S.metas.push({ id: uid(), ...datos });
     toast('🐷 Meta guardada');
   });
@@ -1825,12 +1835,14 @@ function formAporte(meta, retiro) {
   dialogo(retiro ? `Retirar de ${meta.nombre}` : `Aportar a ${meta.nombre}`, `
     ${campo('Monto', `name="monto" type="number" inputmode="decimal" step="0.01" min="0.01" ${retiro ? `max="${disponible.toFixed(2)}"` : ''} required`, retiro ? `Disponible: ${fmt(disponible)}` : '')}
     ${campo('Fecha', `name="fecha" type="date" required value="${hoyISO()}"`)}
-    <label class="campo">${retiro ? '¿A qué cuenta regresa el dinero?' : '¿De qué cuenta sale?'}<select name="medio">${opcionesMedio(medioDefault(true), false)}</select></label>
+    <label class="campo">${retiro ? '¿A qué cuenta regresa el dinero?' : '¿De qué cuenta sale?'}<select name="medio">${opcionesMedio(meta.cuentaId && S.cuentas.some(c => c.id === meta.cuentaId) ? 'c:' + meta.cuentaId : medioDefault(true), false)}</select>
+      ${meta.lugar ? `<span class="hint">${retiro ? 'Sale' : 'Va'} ${retiro ? 'de' : 'a'} tu ${esc(meta.lugar)} «${esc(meta.nombre)}».</span>` : ''}</label>
     ${retiro ? campo('Motivo', 'name="nota" maxlength="80" placeholder="Ej. reparación del auto"') : '<input type="hidden" name="nota" value="">'}
   `, d => {
     const monto = num(d.monto);
     if (monto <= 0) return toast('Ingresa un monto válido'), false;
-    S.movs.push({ id: uid(), tipo: 'ahorro', monto: retiro ? -monto : monto, cat: meta.nombre, metaId: meta.id, fecha: d.fecha, nota: d.nota || (retiro ? 'Retiro' : 'Aportación'), cuentaId: d.medio.slice(2) });
+    S.movs.push({ id: uid(), tipo: 'ahorro', monto: retiro ? -monto : monto, cat: meta.nombre, metaId: meta.id, fecha: d.fecha, nota: d.nota || (retiro ? 'Retiro' : `Al ${meta.lugar ? meta.lugar.toLowerCase() : 'apartado'}`), cuentaId: d.medio.slice(2) });
+    if (!meta.cuentaId) meta.cuentaId = d.medio.slice(2); // recuerda la cuenta para la próxima
     toast(retiro ? 'Retiro registrado' : '🐷 ¡Bien! Aportación registrada');
   }, retiro ? 'Retirar' : 'Aportar');
 }

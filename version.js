@@ -1,8 +1,12 @@
 // Versión de la app. Súbela en cada cambio publicado: la usan app.js (pantalla y avisos)
 // y sw.js (nombre de la caché, para que la app instalada descargue la versión nueva).
-const VERSION = '1.16.1';
+const VERSION = '1.17.0';
 
 const NOVEDADES = [
+  { v: '1.17.0', fecha: '2026-10-01', cambios: [
+    'Metas de ahorro: indica dónde guardas el dinero (ej. BBVA · Apartado). Al aportar, la app elige esa cuenta sola.',
+    'Mis cuentas muestra cuánto tienes en apartados de cada banco, para cuadrar con la app de tu banco.',
+  ] },
   { v: '1.16.1', fecha: '2026-10-01', cambios: [
     'Nuevo diseño de Salud financiera: termómetro de colores con tu carita marcando dónde estás, y la lista de indicadores con su semáforo y su dato.',
   ] },
