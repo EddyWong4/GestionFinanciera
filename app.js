@@ -400,11 +400,25 @@ function simular(presupuesto, estrategia) {
     const activas = ds.filter(d => d.saldo > 0.005);
     for (const d of activas) { const i = d.saldo * d.tasa / 100 / 12 * d.f; d.saldo += i; d.interes += i; interes += i; }
     let disp = presupuesto;
-    for (const d of activas) { const p = Math.min(d.min, d.saldo, disp); d.saldo -= p; disp -= p; }
-    for (const d of activas.sort(ordenar)) { if (disp <= 0) break; const p = Math.min(disp, d.saldo); d.saldo -= p; disp -= p; }
+    // Primer mes: se guarda cuánto va a cada deuda (mínimo + extra) para decir "este mes paga así"
+    if (mesN === 1) for (const d of activas) { d.pago1 = 0; d.min1 = 0; }
+    for (const d of activas) { const p = Math.min(d.min, d.saldo, disp); d.saldo -= p; disp -= p; if (mesN === 1) { d.pago1 += p; d.min1 = p; } }
+    for (const d of activas.sort(ordenar)) { if (disp <= 0) break; const p = Math.min(disp, d.saldo); d.saldo -= p; disp -= p; if (mesN === 1) d.pago1 += p; }
     for (const d of ds) if (d.saldo <= 0.005 && d.mes == null) d.mes = mesN;
   }
   return { meses: mesN, interes, sinFin: mesN >= 600, orden: ds.sort((a, b) => (a.mes ?? 1e9) - (b.mes ?? 1e9)), sumMin };
+}
+
+// Cuánto hay que pagar al mes para quedar sin deudas en "meses" (búsqueda binaria sobre la simulación)
+function presupuestoPara(meses, estrategia) {
+  const act = deudasActivas();
+  if (!act.length) return 0;
+  let lo = act.reduce((a, d) => a + Math.min(d.minimo, saldoDeuda(d)), 0);
+  let hi = lo + act.reduce((a, d) => a + saldoDeuda(d), 0) * 1.5;
+  const alcanza = p => { const r = simular(p, estrategia); return !r.error && !r.sinFin && r.meses <= meses; };
+  if (alcanza(lo)) return Math.ceil(lo);
+  for (let i = 0; i < 40; i++) { const mid = (lo + hi) / 2; if (alcanza(mid)) hi = mid; else lo = mid; }
+  return Math.ceil(hi / 50) * 50; // redondeado a $50 hacia arriba
 }
 
 // Escenario de pagar SOLO el mínimo fijo en cada deuda, sin rodar pagos
@@ -1312,48 +1326,63 @@ async function exportarCSV(anio) {
   toast(`📤 ${lista.length} movimientos exportados`);
 }
 
+// Meta del plan: en cuántos meses quieres salir de deudas (0 = "yo digo cuánto pago")
+const metaPlan = () => S.ajustes.planMeses ?? (S.ajustes.presupuestoDeuda ? 0 : 12);
+
 function planHTML(activas, sumMin, mensMSI = 0) {
-  const est = S.ajustes.estrategia;
-  let presupuesto = S.ajustes.presupuestoDeuda || Math.ceil(sumMin);
+  const est = S.ajustes.estrategia, meta = metaPlan();
+  const presupuesto = meta ? presupuestoPara(meta, est) : Math.max(S.ajustes.presupuestoDeuda || 0, Math.ceil(sumMin));
   const r = simular(presupuesto, est);
-  const alt = simular(presupuesto, est === 'avalancha' ? 'bola' : 'avalancha');
   const sm = simularSoloMinimos();
+  const opciones = [[6, '6 meses'], [12, '1 año'], [18, '18 meses'], [24, '2 años'], [0, 'Yo digo cuánto']];
 
   let cuerpo;
-  if (r.error) {
-    cuerpo = `<div class="tip bad"><span class="ic">⚠️</span><div>Tu presupuesto no alcanza para cubrir los pagos mínimos (${fmt(r.sumMin)}). Aumenta el monto.</div></div>`;
+  if (r.error || r.sinFin) {
+    cuerpo = `<div class="tip bad"><span class="ic">⛔</span><div>Con ${fmt(presupuesto)} al mes ${r.error ? 'no alcanzas a cubrir los pagos mínimos' : 'la deuda nunca se termina de pagar'}. Elige una meta de tiempo arriba y te digo cuánto necesitas.</div></div>`;
   } else {
     const ahorroInt = sm.interes - r.interes;
+    const reparto = r.orden.filter(d => d.pago1 > 0.5).sort((a, b) => b.pago1 - b.min1 - (a.pago1 - a.min1));
     cuerpo = `
-      <div class="comparativo">
-        <div><span class="small muted">Solo pagando mínimos</span><b class="c-deuda">${duracion(sm.meses)}</b><span class="small">Intereses: ${sm.sinFin ? 'infinitos' : fmt(sm.interes)}</span></div>
-        <div class="gana"><span class="small muted">Con tu plan (${fmt(presupuesto)}/mes)</span><b>${duracion(r.meses)}</b><span class="small">Intereses: ${r.sinFin ? 'infinitos' : fmt(r.interes)}</span></div>
+      <div class="plan-meta">
+        <div class="small">Para quedar sin deudas en <b>${fechaFin(r.meses)}</b> (${duracion(r.meses)}) paga:</div>
+        <div class="plan-monto">${fmt(presupuesto)} <span>al mes</span></div>
+        <div class="plan-quincena">o <b>${fmt(presupuesto / 2)}</b> cada quincena</div>
       </div>
-      ${!r.sinFin && ahorroInt > 1 ? `<div class="tip ok"><span class="ic">💸</span><div>Con este plan te ahorras <b>${sm.sinFin ? 'una deuda que nunca terminaría' : fmt(ahorroInt) + ' en intereses'}</b> y quedas libre de deudas en <b>${fechaFin(r.meses)}</b>.</div></div>` : ''}
-      ${r.sinFin ? `<div class="tip bad"><span class="ic">⛔</span><div>Con este monto la deuda no se termina de pagar. Necesitas destinar más dinero al mes.</div></div>` : ''}
-      ${!alt.error && !r.sinFin && Math.abs(alt.interes - r.interes) > 1 ? `<p class="small muted">Con el método ${est === 'avalancha' ? 'bola de nieve' : 'avalancha'} pagarías ${fmt(alt.interes)} en intereses y terminarías en ${duracion(alt.meses)}.</p>` : ''}
-      <table class="plan">
-        <thead><tr><th>#</th><th>Orden de liquidación</th><th class="n">Liquidada en</th><th class="n">Intereses</th></tr></thead>
-        <tbody>${r.orden.map((d, i) => `<tr><td>${i + 1}</td><td>${esc(d.nombre)} <span class="muted small">${d.tasa}%</span></td><td class="n">${d.mes ? fechaFin(d.mes) : '—'}</td><td class="n">${fmt(d.interes)}</td></tr>`).join('')}</tbody>
-      </table>
-      <p class="small muted">Paga el mínimo en todas y todo el excedente a la #${1} de la lista. Cuando la liquides, su pago se suma a la siguiente.</p>`;
+
+      <p class="dia">Así repártelo este mes</p>
+      <ul class="lista">${reparto.map((d, i) => {
+        const extra = d.pago1 - d.min1;
+        return `<li>
+          <span class="num-plan ${extra > 0.5 ? 'prio' : ''}">${extra > 0.5 ? '⭐' : i + 1}</span>
+          <div class="info"><b>${esc(d.nombre)}</b><span class="muted small">${extra > 0.5 ? `mínimo ${fmt(d.min1)} + <b style="color:var(--accent)">extra ${fmt(extra)}</b> · aquí va todo lo extra` : 'solo el mínimo'}</span></div>
+          <span class="monto">${fmt(d.pago1)}<span class="muted small por">${fmt(d.pago1 / 2)} c/quincena</span></span>
+        </li>`;
+      }).join('')}</ul>
+
+      ${ahorroInt > 1 ? `<div class="tip ok"><span class="ic">💸</span><div>Si solo pagaras los mínimos tardarías <b>${sm.sinFin ? 'para siempre' : duracion(sm.meses)}</b>. Con este plan te ahorras <b>${sm.sinFin ? 'una deuda sin fin' : fmt(ahorroInt) + ' en intereses'}</b>.</div></div>` : ''}
+
+      <details class="det-plan"><summary>Ver cuándo terminas cada deuda</summary>
+        <table class="plan"><tbody>${r.orden.map((d, i) => `<tr><td>${i + 1}. ${esc(d.nombre)} <span class="muted small">${d.tasa}%</span></td><td class="n">${d.mes ? 'en ' + fechaFin(d.mes) : '—'}</td><td class="n muted small">${fmt(d.interes)} int.</td></tr>`).join('')}</tbody></table>
+        <p class="small muted">Cuando liquides una deuda, lo que le pagabas pásalo a la siguiente de la lista: el total al mes no cambia.</p>
+      </details>`;
   }
 
   return `<section class="card">
     <h2>🎯 Plan para liquidar</h2>
-    <div class="chips">
-      <button class="chip ${est === 'avalancha' ? 'on' : ''}" data-action="estrategia" data-v="avalancha">🏔️ Avalancha</button>
-      <button class="chip ${est === 'bola' ? 'on' : ''}" data-action="estrategia" data-v="bola">⛄ Bola de nieve</button>
-    </div>
-    <p class="small muted" style="margin-top:-4px">${est === 'avalancha'
-      ? '<b>Avalancha:</b> primero la tasa más alta. Matemáticamente es la que menos intereses paga.'
-      : '<b>Bola de nieve:</b> primero el saldo más pequeño. Liquidas cuentas rápido y te motiva a seguir.'}</p>
-    <label class="campo">¿Cuánto puedes destinar al mes a tus deudas?
+    <p class="small muted" style="margin-top:-6px">¿En cuánto tiempo quieres salir de deudas?</p>
+    <div class="chips">${opciones.map(([v, n]) => `<button class="chip ${meta === v ? 'on' : ''}" data-action="plan-meses" data-v="${v}">${n}</button>`).join('')}</div>
+    ${meta ? '' : `<label class="campo">¿Cuánto puedes pagar al mes en total?
       <input type="number" inputmode="decimal" min="0" step="100" id="presupuesto" value="${presupuesto}">
-      <span class="hint">Equivale a <b>${fmt(presupuesto / 2)} por quincena</b>. Mínimo necesario: ${fmt(sumMin)} al mes. Cada peso extra reduce intereses y tiempo.</span>
-    </label>
+      <span class="hint">Mínimo necesario: ${fmt(sumMin)} al mes (${fmt(sumMin / 2)} por quincena).</span></label>`}
     ${cuerpo}
-    ${mensMSI > 0 ? `<p class="small muted">Aparte pagas ${fmt(mensMSI)}/mes de compras a meses. No entran a este plan porque ya tienen plazo fijo: sepáralo además de este presupuesto.</p>` : ''}
+    <details class="det-plan"><summary>Método: ${est === 'avalancha' ? '🏔️ Avalancha' : '⛄ Bola de nieve'} (cambiar)</summary>
+      <div class="chips" style="margin-top:8px">
+        <button class="chip ${est === 'avalancha' ? 'on' : ''}" data-action="estrategia" data-v="avalancha">🏔️ Avalancha</button>
+        <button class="chip ${est === 'bola' ? 'on' : ''}" data-action="estrategia" data-v="bola">⛄ Bola de nieve</button>
+      </div>
+      <p class="small muted"><b>Avalancha</b> (recomendado): lo extra va a la deuda con la tasa más alta; es la que menos intereses paga.<br><b>Bola de nieve</b>: lo extra va a la deuda más chica; liquidas cuentas rápido y motiva.</p>
+    </details>
+    ${mensMSI > 0 ? `<p class="small muted">Aparte pagas ${fmt(mensMSI)}/mes de compras a meses (${fmt(mensMSI / 2)} por quincena). Ya tienen plazo fijo: sepáralo además de este plan.</p>` : ''}
   </section>`;
 }
 
@@ -2027,6 +2056,12 @@ const ACCIONES = {
     });
   },
   estrategia: el => { S.ajustes.estrategia = el.dataset.v; guardar(); render(); },
+  'plan-meses': el => {
+    const v = +el.dataset.v;
+    // Al pasar a "Yo digo cuánto", parte del monto que se estaba mostrando
+    if (!v && metaPlan()) S.ajustes.presupuestoDeuda = presupuestoPara(metaPlan(), S.ajustes.estrategia);
+    S.ajustes.planMeses = v; guardar(); render();
+  },
   exportar: () => formExportar(),
   'poner-pin': () => formPIN(false),
   'cambiar-pin': () => formPIN(true),

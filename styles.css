@@ -303,3 +303,13 @@ h2.seccion:first-of-type { margin-top: 4px; }
 .dia-sem { border: 1px solid var(--line); background: var(--bg); color: var(--text); border-radius: 99px; padding: 3px 9px; font: inherit; font-size: .75rem; cursor: pointer; }
 .dia-sem.on { background: var(--ingreso); border-color: var(--ingreso); color: #fff; }
 .monto .por { display: block; font-weight: 400; font-size: .72rem; text-align: right; }
+
+/* Plan para liquidar: respuesta directa */
+.plan-meta { background: var(--accent-soft); border-radius: 12px; padding: 14px; text-align: center; margin: 4px 0 6px; }
+.plan-monto { font-size: 1.9rem; font-weight: 800; color: var(--accent); font-variant-numeric: tabular-nums; line-height: 1.2; margin-top: 4px; }
+.plan-monto span { font-size: .95rem; font-weight: 600; }
+.plan-quincena { font-size: .95rem; }
+.num-plan { flex: none; width: 28px; height: 28px; border-radius: 50%; background: var(--line); display: grid; place-items: center; font-size: .8rem; font-weight: 700; }
+.num-plan.prio { background: var(--accent-soft); }
+details.det-plan { margin-top: 10px; }
+details.det-plan summary { cursor: pointer; color: var(--accent); font-size: .88rem; font-weight: 600; padding: 4px 0; }

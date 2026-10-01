@@ -1,8 +1,13 @@
 // Versión de la app. Súbela en cada cambio publicado: la usan app.js (pantalla y avisos)
 // y sw.js (nombre de la caché, para que la app instalada descargue la versión nueva).
-const VERSION = '1.14.3';
+const VERSION = '1.15.0';
 
 const NOVEDADES = [
+  { v: '1.15.0', fecha: '2026-10-01', cambios: [
+    'Plan para liquidar más claro: eliges en cuánto tiempo quieres salir de deudas (6 meses, 1 año, 18 meses, 2 años) y te dice cuánto pagar al mes y por quincena.',
+    'Te dice cómo repartir ese pago este mes: cuánto a cada tarjeta (mínimo + extra).',
+    'Si prefieres, puedes poner tú el monto mensual y ver cuándo terminas.',
+  ] },
   { v: '1.14.3', fecha: '2026-09-30', cambios: [
     '"Dinero libre" ahora se llama "Balance de la quincena" (lo que entró menos lo que salió) y muestra cuánto tienes en tus cuentas, para no confundirlos.',
     'Si el balance sale negativo por abonar a tus deudas, el asesor lo reconoce como algo bueno en lugar de alarmarte.',
