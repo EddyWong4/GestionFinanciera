@@ -53,6 +53,7 @@ const estadoVacio = () => ({
   presupuestos: {}, // { categoría: tope por quincena }
   personas: [], // préstamos entre personas {id, nombre, sentido:'meDeben'|'debo', monto, fecha, nota}
   historial: {}, // patrimonio neto al cierre de cada mes { 'YYYY-MM': monto }
+  historialSalud: {}, // calificación de salud financiera por mes { 'YYYY-MM': 0–100 }
   ajustes: { iva: true, estrategia: 'avalancha', presupuestoDeuda: 0, ultimoExport: null, modo: 'quincena', ultimoMedio: null, cuentasRevisadas: false },
 });
 
@@ -140,6 +141,8 @@ function guardar() {
     try {
       // Foto mensual del patrimonio neto (para ver su evolución en Reportes)
       S.historial[hoyISO().slice(0, 7)] = Math.round(patrimonio().neto);
+      const sf = saludFinanciera();
+      if (sf) S.historialSalud[hoyISO().slice(0, 7)] = sf.total;
       await DB.escribir(S);
       await respaldoAutomatico();
     } catch (e) { toast('⚠️ No se pudo guardar: ' + e.message); }
@@ -626,6 +629,122 @@ function formPresupuesto() {
   total();
 }
 
+/* ---------- Salud financiera (0–100) ---------- */
+// Interpolación por tramos: tramo(x, [[x0, puntos0], [x1, puntos1], ...])
+const tramo = (x, pts) => {
+  if (x <= pts[0][0]) return pts[0][1];
+  for (let i = 1; i < pts.length; i++) { const [x0, y0] = pts[i - 1], [x1, y1] = pts[i]; if (x <= x1) return y0 + (y1 - y0) * (x - x0) / (x1 - x0); }
+  return pts.at(-1)[1];
+};
+const red50 = n => Math.ceil(n / 50) * 50;
+// Promedios mensuales: meses completos recientes (si aún no hay, el mes actual) y el ingreso fijo como respaldo
+function baseMensual() {
+  const act = hoyISO().slice(0, 7);
+  let ms = [...new Set(S.movs.map(m => mesDe(m.fecha)))].filter(m => m < act).sort().slice(-3);
+  if (!ms.length) ms = [act];
+  const tt = ms.map(m => totales(m)), prom = k => tt.reduce((a, t) => a + t[k], 0) / ms.length;
+  const porCat = {};
+  for (const t of tt) for (const [c, v] of Object.entries(t.porCat)) porCat[c] = (porCat[c] || 0) + v / ms.length;
+  const fijoIng = S.fijos.filter(f => f.tipo === 'ingreso').reduce((a, f) => a + f.monto * (f.cuando === 'cada' ? 2 : f.cuando === 'semanal' ? 52 / 12 : 1), 0);
+  return { ingreso: Math.max(prom('ingreso'), fijoIng), gasto: prom('gasto'), ahorro: prom('ahorro'), porCat };
+}
+
+function saludFinanciera() {
+  const b = baseMensual(), ing = b.ingreso;
+  if (ing <= 0) return null;
+  const gasto = b.gasto, q = n => fmt(n / 2);
+  const pil = [];
+
+  // 1. Ahorro
+  const tasa = b.ahorro / ing;
+  pil.push({ n: 'Ahorro', c: 'Ahorro', ic: '🐷', peso: 20, s: tramo(tasa, [[0, 0], [0.1, 60], [0.2, 100]]),
+    dato: `Ahorras ${pct(tasa)} de tu ingreso (meta: 20%)`,
+    accion: () => `Aparta <b>${q(red50(Math.max(0, 0.2 * ing - b.ahorro)))}</b> por quincena el mismo día que cobras, antes de gastar ("págate primero").` });
+
+  // 2. Fondo de emergencia
+  const em = S.metas.find(m => /emergencia/i.test(m.nombre));
+  const fondo = (em ? acumuladoMeta(em) : 0) + S.cuentas.filter(c => c.tipo === 'ahorro').reduce((a, c) => a + Math.max(0, saldoCuenta(c)), 0);
+  const mesesFondo = gasto > 0 ? fondo / gasto : (fondo > 0 ? 6 : 0);
+  pil.push({ n: 'Fondo de emergencia', c: 'Emergencias', ic: '🛟', peso: 20, s: tramo(mesesFondo, [[0, 0], [1, 35], [3, 75], [6, 100]]),
+    dato: `Cubre ${mesesFondo.toFixed(1)} meses de gastos (meta: 3 a 6)`,
+    accion: () => {
+      const falta = Math.max(0, 3 * gasto - fondo), cuota = Math.max(500, red50(ing * 0.05));
+      return `${em ? '' : 'Crea tu <b>Fondo de emergencia</b> en Ahorro. '}Te faltan <b>${fmt(falta)}</b> para 3 meses de gastos: con <b>${fmt(cuota)}</b> por quincena lo juntas en ${Math.max(1, Math.ceil(falta / (cuota * 2)))} meses.`;
+    } });
+
+  // 3. Carga de deudas (pagos mensuales obligatorios / ingreso)
+  const act = deudasActivas();
+  const pagosMes = act.reduce((a, d) => a + Math.min(d.minimo, saldoDeuda(d)), 0) + mensualidadesMes();
+  const carga = pagosMes / ing;
+  const chica = [...act].sort((x, y) => saldoDeuda(x) - saldoDeuda(y))[0];
+  pil.push({ n: 'Carga de deudas', c: 'Pagos', ic: '⚖️', peso: 20, s: tramo(carga, [[0, 100], [0.15, 100], [0.3, 55], [0.5, 0]]),
+    dato: `Tus pagos de deuda son ${pct(carga)} de tu ingreso (sano: hasta 15%)`,
+    accion: () => `No saques nuevas compras a meses${chica ? ` y liquida primero <b>${esc(chica.nombre)}</b> (debes ${fmt(saldoDeuda(chica))}): eso libera ${fmt(Math.min(chica.minimo, saldoDeuda(chica)))} al mes` : ''}.` });
+
+  // 4. Gasto contra ingreso
+  const rel = gasto / ing;
+  const deseo = Object.entries(b.porCat).filter(([c]) => GRUPO[c] === 'D').sort((x, y) => y[1] - x[1])[0];
+  const recorte = red50(Math.max(0, gasto - 0.7 * ing));
+  pil.push({ n: 'Gasto contra ingreso', c: 'Gasto', ic: '🧾', peso: 15, s: tramo(rel, [[0, 100], [0.7, 100], [0.9, 55], [1, 25], [1.2, 0]]),
+    dato: `Gastas ${pct(rel)} de lo que ganas (sano: hasta 70%)`,
+    accion: () => `Recorta <b>${fmt(recorte)}</b> al mes (${q(recorte)} por quincena)${deseo ? `; empieza por <b>${esc(deseo[0])}</b>, donde se van ${fmt(deseo[1])} al mes` : ''}. Ponle tope en "Presupuesto".` });
+
+  // 5. Deuda cara (tasa ≥ 30%) en meses de ingreso
+  const cara = act.filter(d => d.tasa >= 30), saldoCara = cara.reduce((a, d) => a + saldoDeuda(d), 0);
+  let sCara = tramo(saldoCara / ing, [[0, 100], [1, 65], [2, 35], [4, 0]]);
+  const crece = act.some(d => interesMensual(d) > 0 && d.minimo <= interesMensual(d));
+  if (crece) sCara = Math.min(sCara, 15);
+  pil.push({ n: 'Deuda cara', c: 'Deuda cara', ic: '🔥', peso: 15, s: sCara,
+    dato: saldoCara ? `${fmt(saldoCara)} en deudas con tasa alta${crece ? ' · alguna crece aunque pagues el mínimo' : ''}` : 'Sin deudas de tasa alta',
+    accion: () => { const p = presupuestoPara(12, S.ajustes.estrategia); const primera = [...cara].sort((x, y) => y.tasa - x.tasa)[0]; return `Sigue el <b>Plan para liquidar</b>: con <b>${fmt(p)}</b> al mes (${q(p)} por quincena) quedas sin deudas en 1 año${primera ? `. Lo extra, primero a <b>${esc(primera.nombre)}</b>` : ''}.`; } });
+
+  // 6. Uso de crédito (tarjetas con límite)
+  const conLim = tarjetasCredito().filter(d => d.limite > 0);
+  const usoDe = d => (saldoDeuda(d) + msiDeTarjeta(d).reduce((a, c) => a + saldoMSI(c), 0)) / d.limite;
+  const uso = conLim.length ? conLim.reduce((a, d) => a + usoDe(d) * d.limite, 0) / conLim.reduce((a, d) => a + d.limite, 0) : 0;
+  const peor = [...conLim].sort((x, y) => usoDe(y) - usoDe(x))[0];
+  pil.push({ n: 'Uso de crédito', c: 'Crédito', ic: '💳', peso: 10, s: tramo(uso, [[0, 100], [0.1, 100], [0.3, 75], [0.6, 35], [0.9, 0]]),
+    dato: conLim.length ? `Usas ${pct(uso)} de tu línea de crédito (ideal: menos de 30%)` : 'Sin tarjetas con límite registrado',
+    accion: () => peor ? `Baja <b>${esc(peor.nombre)}</b> a menos de ${fmt(peor.limite * 0.3)} (abona ${fmt(Math.max(0, usoDe(peor) * peor.limite - peor.limite * 0.3))}) y no la uses mientras. Mejora tu historial en Buró.` : '' });
+
+  const total = Math.round(pil.reduce((a, p) => a + p.peso * p.s / 100, 0));
+  const acciones = pil.filter(p => p.s < 90).map(p => ({ ...p, gana: Math.round(p.peso * (100 - p.s) / 100), txt: p.accion() }))
+    .filter(a => a.gana > 0 && a.txt).sort((a, b) => b.gana - a.gana);
+  return { total, pil, acciones };
+}
+// Niveles con emoji: la carita grande y el semáforo de cada indicador
+const NIVELES = [[80, '😁', 'Excelente', 'var(--ingreso)'], [60, '🙂', 'Buena', 'var(--accent)'], [40, '😐', 'Regular', 'var(--warn)'], [20, '😟', 'En riesgo', 'var(--gasto)'], [0, '😱', 'Crítica', 'var(--deuda)']];
+const nivelSalud = n => NIVELES.find(([min]) => n >= min);
+const semaforo = s => s >= 80 ? '🟢' : s >= 60 ? '🟡' : s >= 35 ? '🟠' : '🔴';
+
+function htmlSalud() {
+  const sf = saludFinanciera();
+  if (!sf) return `<section class="card"><h2>🩺 Salud financiera</h2><p class="small muted" style="margin:0">Registra tus ingresos (o da de alta tu sueldo como fijo) para calcular tu salud financiera y recibir consejos para mejorarla.</p></section>`;
+  const [, cara, nivel, color] = nivelSalud(sf.total);
+  const ant = S.historialSalud[sumarMeses(hoyISO().slice(0, 7), -1)];
+  const delta = ant == null ? '' : sf.total === ant ? '➖ Igual que el mes pasado' : `${sf.total > ant ? '📈 Subiste' : '📉 Bajaste'} ${Math.abs(sf.total - ant)} puntos vs. el mes pasado`;
+  const top = sf.acciones[0];
+  return `<section class="card">
+    <h2>🩺 Salud financiera</h2>
+    <div class="salud-top">
+      <div class="salud-cara">${cara}</div>
+      <div><div class="salud-num" style="color:${color}">${sf.total}<span>/100</span></div><b style="color:${color}">${nivel}</b>${delta ? `<div class="small muted">${delta}</div>` : ''}</div>
+    </div>
+    <div class="salud-escala">${[...NIVELES].reverse().map(([min, e, n]) => `<span class="${nivelSalud(sf.total)[0] === min ? 'on' : ''}" aria-label="${n}">${e}</span>`).join('')}</div>
+    <div class="salud-pilares">${sf.pil.map(p => `<span>${semaforo(p.s)} ${p.ic} ${p.c}</span>`).join('')}</div>
+    ${top ? `<div class="tip info"><span class="ic">👉</span><div><b>Lo que más te ayuda ahora (+${top.gana} pts):</b> ${top.txt}</div></div>` : '<div class="tip ok"><span class="ic">🏆</span><div>Tus finanzas están en gran forma. Mantén el ritmo e invierte lo que te sobre.</div></div>'}
+    <details class="det-plan"><summary>Ver detalle y cómo mejorar</summary>
+      ${sf.pil.map(p => `<div class="bar-row">
+        <div class="row"><span>${semaforo(p.s)} ${p.ic} ${p.n}</span><span><b>${Math.round(p.peso * p.s / 100)}</b> <span class="meta">/ ${p.peso}</span></span></div>
+        <div class="bar"><span style="width:${p.s}%;background:${nivelSalud(p.s)[3]}"></span></div>
+        <div class="meta">${p.dato}</div></div>`).join('')}
+      <p class="small muted">🟢 bien · 🟡 aceptable · 🟠 hay que mejorar · 🔴 urgente</p>
+      ${sf.acciones.length ? `<p class="dia">✅ Plan para subir tu calificación</p><ol class="acciones-salud">${sf.acciones.map(a => `<li>${a.ic} <b>${a.n} (+${a.gana} pts):</b> ${a.txt}</li>`).join('')}</ol>` : ''}
+      <p class="small muted">Se calcula con tus promedios mensuales (últimos meses completos), tus cuentas, metas y deudas. Es una guía, no tu calificación de Buró.</p>
+    </details>
+  </section>`;
+}
+
 /* ---------- Proyección de las próximas quincenas ---------- */
 // Flujo esperado de una quincena: lo que falta por entrar y salir de tus cuentas
 function flujoQuincena(q, esActual) {
@@ -1002,6 +1121,8 @@ const VISTAS = {
         <div class="kpi"><div class="lbl">Ahorro y pagos</div><div class="val c-ahorro">${fmt(t.ahorro + t.pagos)}</div>${t.pagos ? `<div class="sub">${fmt(t.pagos)} a deudas</div>` : ''}</div>
         <div class="kpi"><div class="lbl">Balance ${esMes() ? 'del mes' : 'de la quincena'}</div><div class="val" style="color:${t.libre < 0 ? 'var(--deuda)' : 'inherit'}">${t.libre > 0 ? '+' : ''}${fmt(t.libre)}</div><div class="sub">lo que entró − lo que salió.<br>Tienes <b>${fmt(totalCuentas())}</b> en tus cuentas</div></div>
       </div>
+
+      ${htmlSalud()}
 
       ${htmlProximosPagos()}
 
@@ -1912,6 +2033,7 @@ function validarDatos(d) {
   if (d && (typeof d.presupuestos !== 'object' || !d.presupuestos)) d.presupuestos = {};
   if (d && !Array.isArray(d.personas)) d.personas = [];
   if (d && (typeof d.historial !== 'object' || !d.historial)) d.historial = {};
+  if (d && (typeof d.historialSalud !== 'object' || !d.historialSalud)) d.historialSalud = {};
   return d && Array.isArray(d.movs) && Array.isArray(d.metas) && Array.isArray(d.deudas) && typeof d.ajustes === 'object';
 }
 async function aplicarDatos(d, msg) {
