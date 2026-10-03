@@ -1,8 +1,12 @@
 // Versión de la app. Súbela en cada cambio publicado: la usan app.js (pantalla y avisos)
 // y sw.js (nombre de la caché, para que la app instalada descargue la versión nueva).
-const VERSION = '1.17.0';
+const VERSION = '1.18.0';
 
 const NOVEDADES = [
+  { v: '1.18.0', fecha: '2026-10-02', cambios: [
+    'Mis cuentas → 💵 Retiro: registra cuando sacas efectivo del cajero. Se descuenta de la cuenta que elijas (BBVA, Nu…) como gasto en "Retiro de efectivo".',
+    'Si el cajero te cobró comisión, también se registra.',
+  ] },
   { v: '1.17.0', fecha: '2026-10-01', cambios: [
     'Metas de ahorro: indica dónde guardas el dinero (ej. BBVA · Apartado). Al aportar, la app elige esa cuenta sola.',
     'Mis cuentas muestra cuánto tienes en apartados de cada banco, para cuadrar con la app de tu banco.',

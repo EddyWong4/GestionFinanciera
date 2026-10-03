@@ -27,7 +27,7 @@ const CATS = {
     ['Vivienda', 'N'], ['Servicios (luz, agua, gas, internet)', 'N'], ['Súper y despensa', 'N'],
     ['Transporte / gasolina', 'N'], ['Salud', 'N'], ['Educación', 'N'], ['Seguros', 'N'],
     ['Restaurantes y comida fuera', 'D'], ['Entretenimiento', 'D'], ['Ropa y calzado', 'D'],
-    ['Suscripciones', 'D'], ['Regalos', 'D'], ['Otros gastos', 'D'], ['Intereses y comisiones', 'D'], ['Pago de deuda', 'A'],
+    ['Suscripciones', 'D'], ['Regalos', 'D'], ['Otros gastos', 'D'], ['Intereses y comisiones', 'D'], ['Retiro de efectivo', 'N'], ['Pago de deuda', 'A'],
   ],
 };
 const GRUPO = Object.fromEntries(CATS.gasto);
@@ -610,7 +610,7 @@ function formPresupuesto() {
   dialogo('Presupuesto por quincena', `
     <p class="small muted" style="margin-top:-6px">Cuánto quieres gastar como máximo en cada categoría <b>por quincena</b>. Deja en blanco las que no quieras controlar.</p>
     ${hayHist ? '<button type="button" class="btn mini sec" id="btn-sugerir" style="margin-bottom:10px">✨ Sugerir según mis gastos de los últimos 3 meses</button>' : ''}
-    <div class="grid2">${CATS_GASTO.map((c, i) => campo(esc(c), `name="p${i}" type="number" inputmode="decimal" min="0" step="50" value="${S.presupuestos[c] || ''}" placeholder="—"`)).join('')}</div>
+    <div class="grid2">${CATS_GASTO.map((c, i) => campo(esc(c), `name="p${i}" type="number" inputmode="decimal" min="0" step="0.01" value="${S.presupuestos[c] || ''}" placeholder="—"`)).join('')}</div>
     <p class="hint" id="pres-total"></p>
   `, d => {
     S.presupuestos = {};
@@ -966,6 +966,7 @@ function htmlCuentas() {
   return `<section class="card">
     <div class="row"><h2 style="margin:0">💰 Mis cuentas</h2>
       <div class="acciones" style="margin:0">
+        <button class="btn mini sec" data-action="retiro-efectivo">💵 Retiro</button>
         ${S.cuentas.length > 1 ? '<button class="btn mini sec" data-action="traspaso">↔ Traspaso</button>' : ''}
         <button class="btn mini sec" data-action="nueva-cuenta">+ Cuenta</button>
       </div></div>
@@ -1676,7 +1677,7 @@ function formMov(mov) {
     ${campo('Nota (opcional)', `name="nota" maxlength="80" value="${esc(m.nota)}" placeholder="Ej. comida con Ana"`)}
     ${campo('Etiquetas (opcional)', `name="tags" maxlength="80" list="tags-usadas" value="${esc((m.tags || []).join(', '))}" placeholder="Ej. viaje, trabajo, bebé"`, 'Sepáralas con comas. Sirven para buscar y saber cuánto gastaste en algo.')}
     <datalist id="tags-usadas">${etiquetasUsadas().map(t => `<option value="${esc(t)}">`).join('')}</datalist>
-    <p class="hint">¿Ahorro, pago de tarjeta o traspaso entre cuentas? Regístralos desde Ahorro, Deudas o "Mis cuentas".</p>
+    <p class="hint">¿Ahorro, pago de tarjeta, retiro de efectivo o traspaso? Regístralos desde Ahorro, Deudas o "Mis cuentas" (💵 Retiro).</p>
   `, d => {
     const monto = num(d.monto);
     if (monto <= 0) return toast('Ingresa un monto válido'), false;
@@ -1718,6 +1719,30 @@ function formCuenta(cuenta) {
     S.ajustes.cuentasRevisadas = true;
     toast(cuenta ? '🏦 Saldo ajustado' : '🏦 Cuenta agregada');
   });
+}
+
+// Retiro de efectivo: sale de la cuenta como gasto en la categoría "Retiro de efectivo" (más la comisión, si hubo)
+function formRetiro() {
+  const def = medioDefault(true);
+  dialogo('💵 Retiro de efectivo', `
+    <label class="campo">¿De qué cuenta sacaste?<select name="origen">${S.cuentas.map(c => `<option value="${c.id}" ${def === 'c:' + c.id ? 'selected' : ''}>${ICON_CUENTA[c.tipo]} ${esc(c.nombre)} (${fmt(saldoCuenta(c))})</option>`).join('')}</select></label>
+    <div class="grid2">
+      ${campo('Monto retirado', 'name="monto" type="number" inputmode="decimal" step="0.01" min="0.01" required')}
+      ${campo('Comisión (opcional)', 'name="comision" type="number" inputmode="decimal" step="0.01" min="0" placeholder="0.00"', 'Si el cajero te cobró')}
+    </div>
+    <div class="grid2">
+      ${campo('Fecha', `name="fecha" type="date" required value="${hoyISO()}"`)}
+      ${campo('¿Para qué? (opcional)', 'name="nota" maxlength="80" placeholder="Ej. mercado, taxi"')}
+    </div>
+    <p class="hint">Se descuenta de la cuenta y cuenta como gasto en "Retiro de efectivo".</p>
+  `, d => {
+    const monto = num(d.monto), comision = num(d.comision);
+    if (monto <= 0) return toast('Ingresa un monto válido'), false;
+    S.movs.push({ id: uid(), tipo: 'gasto', monto, cat: 'Retiro de efectivo', fecha: d.fecha, nota: d.nota.trim(), cuentaId: d.origen });
+    if (comision > 0) S.movs.push({ id: uid(), tipo: 'gasto', monto: comision, cat: 'Intereses y comisiones', fecha: d.fecha, nota: 'Comisión por retiro en cajero', cuentaId: d.origen });
+    per = periodoDe(d.fecha);
+    toast(`💵 Retiro de ${fmt(monto)} registrado`);
+  }, 'Registrar retiro');
 }
 
 function formTraspaso() {
@@ -2084,6 +2109,7 @@ const ACCIONES = {
     });
   },
   traspaso: () => formTraspaso(),
+  'retiro-efectivo': () => formRetiro(),
   filtro: el => { filtroMov = el.dataset.v; render(); },
   'filtro-tag': el => { filtroTag = el.dataset.v; vista = 'movs'; render(); window.scrollTo(0, 0); },
   'mes-prev': () => cambiarMes(-1),
