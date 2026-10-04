@@ -330,3 +330,7 @@ ul.termo-lista li i { flex: 1; border-bottom: 2px dotted var(--line); transform:
 ul.termo-lista li b { white-space: nowrap; font-variant-numeric: tabular-nums; }
 ol.acciones-salud { padding-left: 18px; margin: 6px 0; font-size: .86rem; }
 ol.acciones-salud li { margin-bottom: 8px; }
+
+/* Desglose de la tarjeta: saldo normal + compras a meses */
+.desglose { background: var(--bg); border-radius: 10px; padding: 8px 10px; margin-top: 10px; display: grid; gap: 3px; }
+.desglose .sub-msi { padding-left: 18px; font-size: .78rem; }

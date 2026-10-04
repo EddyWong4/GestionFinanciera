@@ -1,8 +1,12 @@
 // Versión de la app. Súbela en cada cambio publicado: la usan app.js (pantalla y avisos)
 // y sw.js (nombre de la caché, para que la app instalada descargue la versión nueva).
-const VERSION = '1.18.0';
+const VERSION = '1.18.1';
 
 const NOVEDADES = [
+  { v: '1.18.1', fecha: '2026-10-04', cambios: [
+    'Tus tarjetas ahora muestran la deuda total: saldo normal + compras a meses, con el desglose de cada compra.',
+    'Te dice cuánto pagar este mes para no generar intereses (saldo normal + mensualidades).',
+  ] },
   { v: '1.18.0', fecha: '2026-10-02', cambios: [
     'Mis cuentas → 💵 Retiro: registra cuando sacas efectivo del cajero. Se descuenta de la cuenta que elijas (BBVA, Nu…) como gasto en "Retiro de efectivo".',
     'Si el cajero te cobró comisión, también se registra.',

@@ -1613,11 +1613,16 @@ function tarjetaDeuda(d) {
   return `<section class="card">
     <div class="deuda-top">
       <div><h3>${esc(d.nombre)}</h3><span class="badge ${cls}">${TIPOS_DEUDA[d.tipo]}</span></div>
-      <div style="text-align:right"><div class="deuda-saldo">${fmt(s)}</div><span class="small muted">saldo actual</span></div>
+      <div style="text-align:right"><div class="deuda-saldo">${fmt(s + sMSI)}</div><span class="small muted">${sMSI ? 'deuda total' : 'saldo actual'}</span></div>
     </div>
+    ${sMSI ? `<div class="desglose">
+      <div class="row small"><span>💳 Saldo normal</span><b>${fmt(s)}</b></div>
+      <div class="row small"><span>🛍️ A meses (${ligadas.length} compra${ligadas.length > 1 ? 's' : ''})</span><b>${fmt(sMSI)}</b></div>
+      ${ligadas.map(c => `<div class="row small muted sub-msi"><span>${esc(c.nombre)} · ${pagadasMSI(c)}/${c.meses} pagadas</span><span>${fmt(mensualidad(c))}/mes</span></div>`).join('')}
+    </div>` : ''}
     ${uso != null ? `<div class="bar" style="margin-top:10px"><span style="width:${Math.min(100, uso * 100)}%;background:${uso > 0.3 ? 'var(--deuda)' : 'var(--accent)'}"></span></div>
       <div class="small muted" style="margin-top:3px">Uso de línea: ${pct(uso)} de ${fmt(d.limite)}${sMSI ? ' (incluye compras a meses)' : ''}</div>` : ''}
-    ${ligadas.length ? `<div class="tip info"><span class="ic">🛍️</span><div>${ligadas.length} compra${ligadas.length > 1 ? 's' : ''} a meses en esta tarjeta: <b>${fmt(mMSI)}/mes</b> (te faltan ${fmt(sMSI)}). Súmalo a tu pago de cada mes.</div></div>` : ''}
+    ${ligadas.length && esRevolvente(d) ? `<div class="tip info"><span class="ic">🛍️</span><div>Este mes, para no generar intereses paga el saldo normal más las mensualidades: <b>${fmt(s + mMSI)}</b>. El mínimo ya debe incluir ${fmt(mMSI)} de meses.</div></div>` : ''}
     <div class="datos">
       <div>Tasa anual<b>${d.tasa}%</b></div>
       <div>${esRevolvente(d) ? 'Pago mínimo' : 'Pago mensual'}<b>${fmt(d.minimo)}</b></div>
@@ -1878,7 +1883,7 @@ function formDeuda(deuda) {
     ${campo('Nombre', `name="nombre" required maxlength="40" value="${esc(d.nombre)}" placeholder="Ej. Tarjeta BBVA, Liverpool, Coppel…"`)}
     <label class="campo">Tipo<select name="tipo">${Object.entries(TIPOS_DEUDA).map(([k, v]) => `<option value="${k}" ${k === d.tipo ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
     <div class="grid2">
-      ${campo('Saldo actual', `name="saldo" type="number" inputmode="decimal" min="0" step="0.01" required value="${d.saldo}"`)}
+      ${campo('Saldo actual', `name="saldo" type="number" inputmode="decimal" min="0" step="0.01" required value="${d.saldo}"`, 'Sin compras a meses (esas se suman solas)')}
       ${campo('Tasa anual %', `name="tasa" type="number" inputmode="decimal" min="0" max="300" step="0.01" required value="${d.tasa}"`, 'Viene en tu estado de cuenta')}
       <label class="campo"><span id="lbl-minimo">Pago mínimo</span><input name="minimo" type="number" inputmode="decimal" min="0" step="0.01" required value="${d.minimo}"></label>
       <div class="solo-tarjeta">${campo('Límite de crédito', `name="limite" type="number" inputmode="decimal" min="0" step="0.01" value="${d.limite}"`, 'Opcional')}</div>
