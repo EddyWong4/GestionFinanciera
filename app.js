@@ -1093,7 +1093,14 @@ function htmlCompromisos(pend, proyectado) {
 }
 
 /* ---------- Movimientos: búsqueda, filtros y etiquetas ---------- */
-let busqueda = '', filtroCat = '', filtroTag = '';
+let busqueda = '', filtroCat = '', filtroTag = '', filtroTarjeta = '';
+// Tarjeta o crédito al que pertenece un movimiento: compra con ella, pago a ella, compra a meses o su mensualidad
+function tarjetaDeMov(m) {
+  if (m.tarjetaId) return m.tarjetaId;
+  if (m.deudaId) return m.deudaId;
+  const c = (m.msiCompraId || m.msiId) && S.msi.find(c => c.id === (m.msiCompraId || m.msiId));
+  return c ? c.tarjetaId : null;
+}
 const sinAcentos = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 const etiquetasUsadas = () => [...new Set(S.movs.flatMap(m => m.tags || []))].sort((a, b) => a.localeCompare(b, 'es'));
 const leerEtiquetas = txt => [...new Set(String(txt || '').split(/[,#]/).map(t => t.trim().toLowerCase()).filter(Boolean))];
@@ -1105,17 +1112,18 @@ function htmlListaMovs() {
   if (filtroMov !== 'todos') lista = lista.filter(x => x.tipo === filtroMov);
   if (filtroCat) lista = lista.filter(x => x.cat === filtroCat);
   if (filtroTag) lista = lista.filter(x => (x.tags || []).includes(filtroTag));
+  if (filtroTarjeta) lista = lista.filter(x => filtroTarjeta === '*' ? !!tarjetaDeMov(x) : tarjetaDeMov(x) === filtroTarjeta);
   if (q) lista = lista.filter(x => sinAcentos([x.cat, x.nota, nombreMedio(x), (x.tags || []).join(' '), x.monto, fmt(x.monto)].join(' ')).includes(q));
   lista.sort((a, b) => b.fecha.localeCompare(a.fecha) || b.id.localeCompare(a.id));
   const global = q || filtroTag;
 
-  if (!lista.length) return global || filtroCat
-    ? `<div class="card vacio"><div class="big">🔍</div><p>Sin resultados${global ? '' : ` en la ${nombrePeriodo(per)}`}.</p></div>`
+  if (!lista.length) return global || filtroCat || filtroTarjeta
+    ?`<div class="card vacio"><div class="big">🔍</div><p>Sin resultados${global ? '' : ` en la ${nombrePeriodo(per)}`}.</p></div>`
     : `<div class="card vacio"><div class="big">🧾</div><p>No hay movimientos en la ${nombrePeriodo(per)}.</p><button class="btn" data-action="nuevo-mov">Registrar el primero</button></div>`;
 
   // Totales de lo filtrado: útil para "¿cuánto gasté en #viaje?"
-  const tot = lista.reduce((a, x) => { if (x.tipo === 'gasto') a.g += x.monto; else if (x.tipo === 'ingreso') a.i += x.monto; return a; }, { g: 0, i: 0 });
-  let html = `<p class="small muted" style="margin:0 4px 8px">${lista.length} movimiento${lista.length === 1 ? '' : 's'}${global ? ' (en todas las fechas)' : ''}${tot.g ? ` · gastos ${fmt(tot.g)}` : ''}${tot.i ? ` · ingresos ${fmt(tot.i)}` : ''}</p>
+  const tot = lista.reduce((a, x) => { if (x.tipo === 'gasto') a.g += x.monto; else if (x.tipo === 'ingreso') a.i += x.monto; else if (x.tipo === 'pago') a.p += x.monto; return a; }, { g: 0, i: 0, p: 0 });
+  let html = `<p class="small muted" style="margin:0 4px 8px">${lista.length} movimiento${lista.length === 1 ? '' : 's'}${global ? ' (en todas las fechas)' : ''}${tot.g ? ` · ${filtroTarjeta ? 'compras' : 'gastos'} ${fmt(tot.g)}` : ''}${tot.i ? ` · ingresos ${fmt(tot.i)}` : ''}${filtroTarjeta && tot.p ? ` · pagos ${fmt(tot.p)}` : ''}</p>
     <div class="card" style="padding-top:4px">`;
   let dia = '';
   for (const x of lista) {
@@ -1234,6 +1242,7 @@ const VISTAS = {
           <select id="filtro-cat" aria-label="Categoría"><option value="">Todas las categorías</option>${cats.map(c => `<option ${c === filtroCat ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
           <select id="filtro-tag" aria-label="Etiqueta"><option value="">Todas las etiquetas</option>${tags.map(t => `<option value="${esc(t)}" ${t === filtroTag ? 'selected' : ''}>#${esc(t)}</option>`).join('')}</select>
         </div>
+        ${S.deudas.length ? `<select id="filtro-tarjeta" aria-label="Tarjeta" style="margin-top:8px;width:100%"><option value="">💳 Todas las tarjetas y cuentas</option><option value="*" ${filtroTarjeta === '*' ? 'selected' : ''}>💳 Solo movimientos con tarjeta</option>${S.deudas.map(d => `<option value="${d.id}" ${d.id === filtroTarjeta ? 'selected' : ''}>💳 ${esc(d.nombre)}</option>`).join('')}</select>` : ''}
       </div>
       <div class="chips">${chips}</div>
       <div id="lista-movs">${htmlListaMovs()}</div>`;
@@ -2336,6 +2345,7 @@ document.addEventListener('input', e => {
 document.addEventListener('change', e => {
   if (e.target.id === 'filtro-cat') { filtroCat = e.target.value; refrescarLista(); }
   if (e.target.id === 'filtro-tag') { filtroTag = e.target.value; refrescarLista(); }
+  if (e.target.id === 'filtro-tarjeta') { filtroTarjeta = e.target.value; refrescarLista(); }
   if (e.target.dataset.action === 'toggle-iva') ACCIONES['toggle-iva'](e.target);
   if (e.target.id === 'presupuesto') { S.ajustes.presupuestoDeuda = num(e.target.value); guardar(); render(); }
   if (e.target.id === 'archivo') {

@@ -1,8 +1,11 @@
 // Versión de la app. Súbela en cada cambio publicado: la usan app.js (pantalla y avisos)
 // y sw.js (nombre de la caché, para que la app instalada descargue la versión nueva).
-const VERSION = '1.19.0';
+const VERSION = '1.20.0';
 
 const NOVEDADES = [
+  { v: '1.20.0', fecha: '2026-10-14', cambios: [
+    'Movimientos: filtro por tarjeta. Ve las compras, pagos y mensualidades de una tarjeta, con el total de compras y de pagos.',
+  ] },
   { v: '1.19.0', fecha: '2026-10-14', cambios: [
     'Pagar tarjeta: "Liquidar todo" ahora incluye las compras a meses. Lo que pagas arriba del saldo normal liquida tus mensualidades.',
     'Nuevo botón "Sin intereses": saldo normal + la mensualidad del mes.',
