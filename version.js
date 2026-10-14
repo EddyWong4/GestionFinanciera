@@ -1,8 +1,14 @@
 // Versión de la app. Súbela en cada cambio publicado: la usan app.js (pantalla y avisos)
 // y sw.js (nombre de la caché, para que la app instalada descargue la versión nueva).
-const VERSION = '1.18.1';
+const VERSION = '1.19.0';
 
 const NOVEDADES = [
+  { v: '1.19.0', fecha: '2026-10-14', cambios: [
+    'Pagar tarjeta: "Liquidar todo" ahora incluye las compras a meses. Lo que pagas arriba del saldo normal liquida tus mensualidades.',
+    'Nuevo botón "Sin intereses": saldo normal + la mensualidad del mes.',
+    'Si ya habías pagado el total y tus compras a meses seguían contando, la tarjeta te ofrece "Aplicarlo a compras a meses".',
+    'Compras a meses → "Ya la liquidé": márcala como pagada sin descontar otra vez de tus cuentas.',
+  ] },
   { v: '1.18.1', fecha: '2026-10-04', cambios: [
     'Tus tarjetas ahora muestran la deuda total: saldo normal + compras a meses, con el desglose de cada compra.',
     'Te dice cuánto pagar este mes para no generar intereses (saldo normal + mensualidades).',
